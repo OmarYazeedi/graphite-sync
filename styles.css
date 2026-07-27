@@ -1,0 +1,26 @@
+.lp-sync-view { padding: 8px 10px; }
+.lp-sync-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.lp-sync-head h4 { margin: 0; }
+.lp-sync-actions { display: flex; gap: 6px; }
+.lp-sync-section { margin-top: 14px; }
+.lp-sync-label {
+  font-size: 10.5px; letter-spacing: 1px; color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 3px; margin-bottom: 6px;
+}
+.lp-sync-dim { color: var(--text-muted); font-size: 12px; }
+.lp-sync-bad { color: var(--text-error); }
+.lp-sync-row {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12.5px;
+}
+.lp-sync-row-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lp-sync-state { font-size: 11px; }
+.lp-state-in-sync { color: var(--color-green, #4a7); }
+.lp-state-local-edits { color: var(--color-orange, #b82); }
+.lp-state-missing { color: var(--text-error); }
+.lp-sync-row-btns { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+.lp-sync-row-btns button { font-size: 11px; padding: 2px 8px; }
+.lp-sync-how { margin: 4px 0 0 18px; padding: 0; font-size: 12px; color: var(--text-muted); }
+.lp-sync-how li { margin: 3px 0; }
+.lp-picker-hint { color: var(--text-muted); font-size: 12px; }

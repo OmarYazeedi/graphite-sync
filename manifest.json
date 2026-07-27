@@ -1,0 +1,10 @@
+{
+  "id": "graphite-sync",
+  "name": "Graphite Sync",
+  "version": "0.2.1",
+  "minAppVersion": "1.4.0",
+  "description": "Two-way sync with your self-hosted Graphite (Life Planner) server: pull Spaces into any vault as Markdown, edit in Obsidian, push back through a validate-first merge. Sync panel with per-file status, destination-vault routing, optional auto-push.",
+  "author": "Omar Yazeedi",
+  "authorUrl": "https://findgraphite.com",
+  "isDesktopOnly": false
+}
