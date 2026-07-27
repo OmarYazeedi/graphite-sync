@@ -42,6 +42,10 @@ validate-first merge — nothing ever half-lands.
 
 ## Requirements
 
+[Graphite](https://findgraphite.com) is a self-hostable life/work planner (spaces of
+tasks, notes, calendars, expenses and more) with Markdown export/import at
+its core. This plugin is its Obsidian bridge.
+
 - A running Graphite (Life Planner) server you control.
 - An **API token**: in the app go to *Settings → Where am I signed in? →
   Generate API token*, and paste it into the plugin settings together with
