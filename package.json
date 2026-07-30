@@ -1,7 +1,7 @@
 {
   "name": "graphite-sync",
-  "version": "0.2.2",
-  "description": "Graphite (Life Planner) <-> Obsidian bridge (R-231/R-290)",
+  "version": "0.2.3",
+  "description": "Graphite <-> Obsidian bridge (R-231/R-290)",
   "main": "main.js",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --external:obsidian --outfile=main.js --format=cjs --platform=browser"

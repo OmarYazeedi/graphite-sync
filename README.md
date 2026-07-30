@@ -1,7 +1,6 @@
 # Graphite Sync for Obsidian
 
-Two-way bridge between your Obsidian vaults and a self-hosted **Graphite**
-(Life Planner) server. Pull any of your Spaces into a vault as clean
+Two-way bridge between your Obsidian vaults and a self-hosted **Graphite** server. Pull any of your Spaces into a vault as clean
 Markdown, edit it like any other note, and push it back through a
 validate-first merge — nothing ever half-lands.
 
@@ -42,11 +41,7 @@ validate-first merge — nothing ever half-lands.
 
 ## Requirements
 
-[Graphite](https://findgraphite.com) is a self-hostable life/work planner (spaces of
-tasks, notes, calendars, expenses and more) with Markdown export/import at
-its core. This plugin is its Obsidian bridge.
-
-- A running Graphite (Life Planner) server you control.
+- A running Graphite server you control.
 - An **API token**: in the app go to *Settings → Where am I signed in? →
   Generate API token*, and paste it into the plugin settings together with
   your server URL. Tokens are listed and revocable in the app at any time.

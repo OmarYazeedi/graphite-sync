@@ -1,4 +1,4 @@
-// R-231/R-290: Graphite Sync — the Graphite (Life Planner) <-> Obsidian bridge, v2.
+// R-231/R-290: Graphite Sync — the Graphite <-> Obsidian bridge, v2.
 // Rides the SAME contracts as the app:
 //   Pull  — GET  /api/spaces/:id/export.md  → vault file (server-canonical)
 //   Push  — POST /api/spaces/import.md {mode:'merge'} → validate-first;
@@ -602,7 +602,7 @@ class LpSettingTab extends PluginSettingTab {
     containerEl.empty();
     new Setting(containerEl)
       .setName('Server URL')
-      .setDesc('e.g. https://cclp.omaryazeedi.com')
+      .setDesc('e.g. https://graphite.omaryazeedi.com')
       .addText((t) => t.setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
         this.plugin.settings.serverUrl = v.trim();
         await this.plugin.saveSettings();
