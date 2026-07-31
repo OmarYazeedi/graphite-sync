@@ -1,7 +1,7 @@
 {
   "id": "graphite-sync",
   "name": "Graphite Sync",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "1.4.0",
   "description": "Two-way sync with your self-hosted Graphite server: pull spaces into your vault as Markdown, edit them as ordinary notes, push back through a validate-first merge. Sync panel with per-file status, destination-vault routing, optional auto-push.",
   "author": "Omar Yazeedi",

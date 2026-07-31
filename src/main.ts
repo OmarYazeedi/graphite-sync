@@ -19,6 +19,10 @@ import {
   App, FileSystemAdapter, FuzzySuggestModal, ItemView, Modal, Notice, Plugin,
   PluginSettingTab, Setting, TFile, WorkspaceLeaf, requestUrl,
 } from 'obsidian';
+import { RangeSetBuilder } from '@codemirror/state';
+import {
+  Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate,
+} from '@codemirror/view';
 
 const VIEW_TYPE = 'graphite-sync';
 
@@ -43,9 +47,59 @@ interface LpSettings {
   /** vault file path -> synced space. */
   files: Record<string, FileEntry>;
   autoPush: boolean;
+  /** Hide the round-trip `lp:` id markers in tracked files (like the app). */
+  hideIds: boolean;
 }
 
-const DEFAULTS: LpSettings = { serverUrl: '', token: '', files: {}, autoPush: false };
+const DEFAULTS: LpSettings = {
+  serverUrl: '', token: '', files: {}, autoPush: false, hideIds: true,
+};
+
+/* ── id-marker hiding (R-361) ─────────────────────────────────────────────
+ * Exports carry per-record anchors — ` | lp: <id>` suffixes and
+ * `<!-- lp: <id> -->` comments — that the merge importer needs but no
+ * human should have to read. In tracked files we hide them in the editor
+ * (revealed only on the line the cursor is on, so they stay inspectable
+ * and deletable) and strip them from reading view. The FILE is untouched:
+ * pushes still carry every id. */
+const LP_ID_RE = /(?: ?\| ?lp: [A-Za-z0-9]+)|(?:<!-- lp: \S+ -->)/g;
+
+let gPlugin: GraphitePlugin | null = null;
+
+function buildHideDecos(view: EditorView): DecorationSet {
+  const p = gPlugin;
+  const file = p?.app.workspace.getActiveFile();
+  if (!p?.settings.hideIds || !file || !p.settings.files[file.path]) {
+    return Decoration.none;
+  }
+  const b = new RangeSetBuilder<Decoration>();
+  const sel = view.state.selection.main;
+  const selFrom = view.state.doc.lineAt(sel.from).number;
+  const selTo = view.state.doc.lineAt(sel.to).number;
+  for (const { from, to } of view.visibleRanges) {
+    const text = view.state.doc.sliceString(from, to);
+    for (const m of text.matchAll(LP_ID_RE)) {
+      const start = from + (m.index ?? 0);
+      const line = view.state.doc.lineAt(start).number;
+      if (line >= selFrom && line <= selTo) continue; // active line: reveal
+      b.add(start, start + m[0].length, Decoration.replace({}));
+    }
+  }
+  return b.finish();
+}
+
+const lpHideExtension = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) { this.decorations = buildHideDecos(view); }
+    update(u: ViewUpdate) {
+      if (u.docChanged || u.selectionSet || u.viewportChanged) {
+        this.decorations = buildHideDecos(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
 
 /** djb2 — cheap content fingerprint, only ever compared to itself. */
 function hash(s: string): string {
@@ -75,6 +129,20 @@ export default class GraphitePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    gPlugin = this;
+    // R-361: hide lp id markers — editor (live preview/source) + reading view.
+    this.registerEditorExtension(lpHideExtension);
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      if (!this.settings.hideIds || !this.settings.files[ctx.sourcePath]) return;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n: Node | null;
+      while ((n = walker.nextNode())) {
+        if (n.nodeValue && LP_ID_RE.test(n.nodeValue)) {
+          n.nodeValue = n.nodeValue.replace(LP_ID_RE, '');
+        }
+        LP_ID_RE.lastIndex = 0;
+      }
+    });
     this.addSettingTab(new LpSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new LpSyncView(leaf, this));
     this.addRibbonIcon('refresh-cw', 'Graphite sync', () => this.openPanel());
@@ -619,6 +687,15 @@ class LpSettingTab extends PluginSettingTab {
       .setDesc('Verifies the URL + token against the server and shows who you are signed in as.')
       .addButton((b) => b.setButtonText('Test connection').setCta().onClick(async () => {
         await this.plugin.checkConnection(true);
+      }));
+    new Setting(containerEl)
+      .setName('Hide sync ids')
+      .setDesc('Hide the "lp:" id markers the sync uses for matching records. '
+        + 'They stay in the file (pushes need them) and reveal themselves on '
+        + 'the line you are editing.')
+      .addToggle((t) => t.setValue(this.plugin.settings.hideIds).onChange(async (v) => {
+        this.plugin.settings.hideIds = v;
+        await this.plugin.saveSettings();
       }));
     new Setting(containerEl)
       .setName('Auto-push on save')
