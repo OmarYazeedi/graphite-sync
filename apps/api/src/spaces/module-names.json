@@ -1,0 +1,167 @@
+{
+  "TASKS": {
+    "name": "Tasks",
+    "record": "Task",
+    "records": "Tasks"
+  },
+  "NOTES": {
+    "name": "Notes",
+    "record": "Note",
+    "records": "Notes"
+  },
+  "CALENDAR": {
+    "name": "Calendar",
+    "record": "Event",
+    "records": "Events"
+  },
+  "SUPPLY": {
+    "name": "Supplies",
+    "record": "Supply",
+    "records": "Supplies"
+  },
+  "RECIPES": {
+    "name": "Recipes",
+    "record": "Recipe",
+    "records": "Recipes"
+  },
+  "MEAL_PLAN": {
+    "name": "Meal Plan",
+    "record": "Meal",
+    "records": "Meals"
+  },
+  "VISITS": {
+    "name": "Visits",
+    "record": "Visit",
+    "records": "Visits"
+  },
+  "REFERENCE": {
+    "name": "Lists",
+    "record": "Item",
+    "records": "Items"
+  },
+  "WORK_SCHEDULE": {
+    "name": "Work Schedule",
+    "record": "Shift",
+    "records": "Shifts"
+  },
+  "LEAVE": {
+    "name": "Leave",
+    "record": "Leave",
+    "records": "Leave"
+  },
+  "EXPENSES": {
+    "name": "Budget",
+    "record": "Entry",
+    "records": "Entries"
+  },
+  "VOTING": {
+    "name": "Voting",
+    "record": "Poll",
+    "records": "Polls"
+  },
+  "DOCUMENTS": {
+    "name": "Documents",
+    "record": "Document",
+    "records": "Documents"
+  },
+  "HABITS": {
+    "name": "Habits",
+    "record": "Habit",
+    "records": "Habits"
+  },
+  "MEDICATION": {
+    "name": "Medication",
+    "record": "Course",
+    "records": "Courses"
+  },
+  "MEASUREMENTS": {
+    "name": "Measurements",
+    "record": "Measurement",
+    "records": "Measurements"
+  },
+  "TIMELINE": {
+    "name": "Timeline",
+    "record": "Entry",
+    "records": "Entries"
+  },
+  "REMINDERS": {
+    "name": "Reminders",
+    "record": "Reminder",
+    "records": "Reminders"
+  },
+  "CHECKLISTS": {
+    "name": "Checklists",
+    "record": "Checklist",
+    "records": "Checklists"
+  },
+  "ASSETS": {
+    "name": "Assets",
+    "record": "Asset",
+    "records": "Assets"
+  },
+  "COMMENTS": {
+    "name": "Thread",
+    "record": "Reply",
+    "records": "Replies"
+  },
+  "TABLES": {
+    "name": "Tables",
+    "record": "Row",
+    "records": "Rows"
+  },
+  "ROTA": {
+    "name": "Rota",
+    "record": "Duty",
+    "records": "Duties"
+  },
+  "PERSON_DETAILS": {
+    "name": "Person Details",
+    "record": "Detail",
+    "records": "Details"
+  },
+  "PERSON_ASSIGNED": {
+    "name": "Assigned",
+    "record": "Assigned item",
+    "records": "Assigned items"
+  },
+  "GOALS": {
+    "name": "Goals",
+    "record": "Goal",
+    "records": "Goals"
+  },
+  "PINS": {
+    "name": "Places",
+    "record": "Place",
+    "records": "Places"
+  },
+  "CUSTOM_FIELDS": {
+    "name": "Custom Fields",
+    "record": "Field",
+    "records": "Fields"
+  },
+  "PLAN": {
+    "name": "Plan",
+    "record": "Item",
+    "records": "Items"
+  },
+  "CIRCLES": {
+    "name": "Savings Circle",
+    "record": "Circle",
+    "records": "Circles"
+  },
+  "CARE": {
+    "name": "Care",
+    "record": "Care event",
+    "records": "Care log"
+  },
+  "CYCLE": {
+    "name": "Cycle",
+    "record": "Period",
+    "records": "Periods"
+  },
+  "PREGNANCY": {
+    "name": "Pregnancy",
+    "record": "Appointment",
+    "records": "Appointments"
+  }
+}

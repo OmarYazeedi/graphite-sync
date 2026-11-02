@@ -1,0 +1,10 @@
+{
+  "id": "graphite-sync",
+  "name": "Graphite Sync",
+  "version": "0.5.0",
+  "minAppVersion": "1.4.0",
+  "description": "Sync your vault with a self-hosted Graphite server: pull spaces as linked Markdown notes, edit them like any note, and push changes back through a validate-first merge.",
+  "author": "Omar Yazeedi",
+  "authorUrl": "https://findgraphite.com",
+  "isDesktopOnly": false
+}

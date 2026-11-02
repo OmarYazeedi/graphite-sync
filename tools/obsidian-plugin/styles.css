@@ -1,0 +1,90 @@
+.lp-sync-view { padding: 8px 10px; }
+.lp-sync-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.lp-sync-head h4 { margin: 0; }
+.lp-sync-actions { display: flex; gap: 6px; }
+.lp-sync-section { margin-top: 14px; }
+.lp-sync-label {
+  font-size: 10.5px; letter-spacing: 1px; color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 3px; margin-bottom: 6px;
+}
+.lp-sync-dim { color: var(--text-muted); font-size: 12px; }
+.lp-sync-bad { color: var(--text-error); }
+.lp-sync-row {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12.5px;
+}
+.lp-sync-row-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lp-sync-state { font-size: 11px; }
+.lp-state-in-sync { color: var(--color-green, #4a7); }
+.lp-state-local-edits { color: var(--color-orange, #b82); }
+.lp-state-missing { color: var(--text-error); }
+/* R-379: one line per note under the space it belongs to. The note name takes
+   the space left over, so the state and its two buttons stay put however long
+   the module name is. */
+.lp-sync-file {
+  display: flex; align-items: center; gap: 6px; margin-top: 4px;
+  padding-left: 8px; border-left: 2px solid var(--background-modifier-border);
+  font-size: 12px;
+}
+.lp-sync-file > span:first-child {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-sync-file button { font-size: 11px; padding: 1px 7px; }
+.lp-sync-row-btns { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+.lp-sync-row-btns button { font-size: 11px; padding: 2px 8px; }
+.lp-sync-how { margin: 4px 0 0 18px; padding: 0; font-size: 12px; color: var(--text-muted); }
+.lp-sync-how li { margin: 3px 0; }
+.lp-picker-hint { color: var(--text-muted); font-size: 12px; }
+
+/* OC4 — ITALIC UNTIL APPROVED, and the state at a glance. Italic is drawn by
+   the markdown itself; these say WHICH state an italic line is in, so a
+   proposal never reads as a record. Absolutely placed, so the tag never
+   moves a character or the cursor. */
+.cm-line.gr-proposal { position: relative; padding-right: 7em; }
+.cm-line.gr-proposal::after {
+  content: attr(data-gr-state);
+  position: absolute; right: 4px; top: 0.15em; pointer-events: none;
+  font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  font-style: normal; padding: 0 6px; border-radius: 3px;
+}
+.cm-line.gr-proposal-proposed {
+  background: rgba(242, 184, 75, 0.14); box-shadow: inset 3px 0 0 #F2B84B;
+}
+.cm-line.gr-proposal-proposed::after { color: #8A5B08; background: rgba(242, 184, 75, 0.28); }
+.cm-line.gr-proposal-approved {
+  background: rgba(47, 93, 98, 0.10); box-shadow: inset 3px 0 0 #2F5D62;
+}
+.cm-line.gr-proposal-approved::after { color: #2F5D62; background: rgba(47, 93, 98, 0.18); }
+.cm-line.gr-proposal-unreadable {
+  background: rgba(154, 43, 24, 0.08); box-shadow: inset 3px 0 0 var(--text-error);
+}
+.cm-line.gr-proposal-unreadable::after { color: var(--text-error); background: rgba(154, 43, 24, 0.14); }
+.theme-dark .cm-line.gr-proposal-proposed::after { color: #F2B84B; }
+.theme-dark .cm-line.gr-proposal-approved::after { color: #7FB3B8; }
+/* Reading view: the key is stripped; the line keeps its italic and its wash. */
+li.gr-proposal { background: rgba(242, 184, 75, 0.14); box-shadow: inset 3px 0 0 #F2B84B; }
+.gr-proposal-row .lp-sync-state { text-transform: uppercase; letter-spacing: 0.05em; }
+.gr-proposal-row.gr-proposal-proposed > span:first-child { font-style: italic; }
+
+/* OC3 — the >> route list: the path dimmed above the leaf. */
+.gr-route { display: flex; gap: 2px; align-items: baseline; flex-wrap: wrap; }
+.gr-route-above { color: var(--text-faint); }
+.gr-route-leaf { font-weight: 600; }
+.gr-route-tag { margin-left: auto; padding-left: 12px; color: var(--text-accent); font-size: 0.85em; }
+.gr-route-mods { color: var(--text-faint); font-size: 0.8em; }
+
+/* Register 2519: the links panel. */
+.gr-links-view { padding: 8px 10px; }
+.gr-links-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.gr-links-record { font-weight: 600; }
+.gr-links-dim { color: var(--text-muted); font-size: 12px; }
+.gr-links-bad { color: var(--text-error); font-size: 12px; }
+.gr-links-group { margin-top: 10px; }
+.gr-links-module {
+  font-size: 10.5px; letter-spacing: 1px; color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 3px; margin-bottom: 4px;
+}
+.gr-links-row { font-size: 12.5px; padding: 2px 0; }
+.gr-links-binned { color: var(--text-faint); text-decoration: line-through; }

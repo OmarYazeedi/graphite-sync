@@ -1,0 +1,20 @@
+// NOT tsconfig.json, on purpose. esbuild reads a file of that name by
+// itself, and the first version of this config was one: the rebuilt bundle
+// gained "use strict" and lowered every class field, so the shipped main.js
+// changed because a TYPECHECK was added. The CI step that diffs a fresh build
+// against the committed bundle caught it on its first run. This file is read
+// by `npm run typecheck` and by nothing else.
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "es2020",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "lib": ["es2020", "dom"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["src/**/*.ts"]
+}
