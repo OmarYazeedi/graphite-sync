@@ -21,18 +21,32 @@ import {
   Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, requestUrl,
 } from 'obsidian';
 import { RangeSetBuilder } from '@codemirror/state';
-import { LP_ID_RE, lpHiddenRanges } from './lp-ids';
+import { FF_ENDS, FF_STARTS, LP_ID_RE, isMarkerHeaderCell, lpHiddenRanges } from './lp-ids';
 import { LP_TAIL, PROPOSAL_TAIL } from '../../../apps/api/src/spaces/vault-anchor';
 import { finalised, approvedText, lineOfKey, proposalsIn, readProposal } from './proposals';
 import {
   RawSpace, Route, buildRoutes, filterRoutes, frontmatterFor, frontmatterRange, insertionFor,
-  makeTasks, noteSpace, routeTrigger, sectionFor,
+  makeTasks, noteSpace, routable, routeTrigger, sectionFor,
 } from './routing';
 import {
   mergeTick, tickOf, withTick, type TickState,
 } from '../../../apps/api/src/spaces/vault-tick';
-import { censusOf, inCensus, localDay, type CensusNote } from './census';
+import { censusOf, inCensus, localDay, noteDay, type CensusNote } from './census';
 import { bodyLines } from './note-lines';
+import {
+  PRIORITIES, addTag, asTaskLine, cleanTag, insertBlock, isCaptured, listStart, nextTaskLine, readField, setField,
+} from './toolbar-lines';
+import { readDue } from './toolbar-due';
+import {
+  type ListKind, destinationOf, listTargets, suggestedTarget, targetLabel, targetToken,
+} from './toolbar-where';
+import {
+  type ToolbarLists, type ToolbarPerson, TOOLBAR_LISTS_PATH, buildLists, listsFile, readListsFile, sameLists,
+} from './toolbar-lists';
+import { DueModal, PickModal, type Anchor, type PickItem } from './toolbar-ui';
+import { barWanted } from './toolbar-bar';
+import { isToolbarFile } from './toolbar-lists';
+import { type BarPane, drawBar } from './toolbar-mount';
 import {
   AGENT_BRIEF_PATH, ROUTING_LIST_PATH, type RoutingList, agentBriefNote, contractProblems,
   isAgentFile, routingListNote, routingListOf,
@@ -46,9 +60,25 @@ import {
 import { LinkLogFeed, NOT_A_RECORD, RecordRef, Spot, readLinkLog, recordAt, type LinkLog } from './links';
 import { LINKS_VIEW, LinksView, pickLink } from './links-panel';
 import { Handshake, outdatedSentence, readHandshake } from './handshake';
+// THIS DEVICE: the Graphite app on the same device as a place to get spaces
+// from, with no server (device-mirror.ts says what is read of what it leaves).
+import { lookForMirror, mirrorSentence, mirrorShort, type MirrorLook } from './device-mirror';
+export { MIRROR_INDEX, ago, lookForMirror, mirrorSentence, mirrorShort } from './device-mirror';
 // The pure halves, exported so the suite can read them off the bundle.
 export { isBelow, readHandshake } from './handshake';
 export { recordAt, pickerRoles } from './links';
+// R-062: the marker readers, exported so the suite can read them off the bundle.
+export { lpHiddenRanges, isMarkerHeaderCell } from './lp-ids';
+export { noteSpace, frontmatterFor, buildRoutes } from './routing';
+export { readProposal, finalised, approvedText, proposalLine, proposalsIn } from './proposals';
+export { censusOf } from './census';
+export { agentBriefNote, contractProblems } from './agent';
+// THE GRAPHITE BAR: what the pickers write and where a line goes, exported for the suite.
+export * from './toolbar-lines';
+export * from './toolbar-due';
+export * from './toolbar-where';
+export { BAR_BUTTONS, MOBILE_TARGET_PX } from './toolbar-bar';
+export { buildLists, listsFile, readListsFile, sameLists, TOOLBAR_LISTS_PATH, isToolbarFile } from './toolbar-lists';
 // R-364: the one module-name table, via the api's committed copy (esbuild
 // inlines it at build time). The picker used to lowercase the raw enum — a
 // fourth accidental naming table.
@@ -63,6 +93,7 @@ import { SESSION_STAMP_EVERY_MS } from '../../../apps/api/src/auth/session-stamp
 import { CouchClient, LIVE_WAIT_MS, LiveFollower, noteLiveBadge, type LiveState } from './couch-client';
 import { NOTE_SYNC_KINDS, NOTE_SYNC_LABELS, type NoteSyncKind, type TransportCheck } from './note-sync';
 import { SETTINGS_NOTE_PATH, noteMatches, readSettingsNote, settingsNoteText } from './sync-config';
+import { PageSync } from './pages';
 import { CouchNoteTransport } from './couch-notes';
 import {
   NoteSyncEngine, emptyNoteSyncState, type NoteBaseStore, type NoteSyncReport, type NoteSyncState,
@@ -80,6 +111,7 @@ export {
 export { CouchNoteTransport, INLINE_SEAL_MAX, NoteSyncRefusal, SEAL_ATTACHMENT } from './couch-notes';
 export { NoteSyncEngine, conflictCopyPath, emptyNoteSyncState, mergeable } from './note-engine';
 export { MERGE_MAX_CELLS, mergeLines, splitLines } from './note-merge';
+export { fingerprint, hasRoutingHeading, inPageFolder, isPage, parseFolders } from './pages';
 export {
   KEPT_OUT, NOTE_KEYS, SECRET_KEYS, SETTINGS_NOTE_PATH, noteMatches, readSettingsNote, settingsNoteText,
 } from './sync-config';
@@ -259,10 +291,24 @@ interface FileEntry {
 }
 
 interface LpSettings {
+  /** Where this vault gets Graphite: a server (the default, and every
+   *  vault made before this existed), or the Graphite app on this device,
+   *  which writes the notes into the vault itself. */
+  source: 'server' | 'device';
   serverUrl: string;
   token: string;
   /** vault file path -> synced space. */
   files: Record<string, FileEntry>;
+  /** ROW 2514 (R-2841): THE TEXT EACH SYNCED NOTE HAD WHEN THE SERVER LAST
+   *  WROTE IT — what a pull put in the file, or the canonical text a push
+   *  wrote back. Sent as `base` on the next push so the server can tell a
+   *  field only the vault changed (written) from one only Graphite changed
+   *  (kept) from one both changed (held, and asked about in the app). Kept
+   *  apart from `files` because a pull replaces a whole file entry, and
+   *  small on purpose: capped, oldest dropped, pruned with the note. Absent
+   *  in a data.json from before, and then a note pushes as it always did.
+   *  Oldest first, so eviction is a delete from the front. */
+  bases: Record<string, string>;
   autoPush: boolean;
   /** Hide the round-trip `lp:` id markers in tracked files (like the app). */
   hideIds: boolean;
@@ -295,6 +341,17 @@ interface LpSettings {
   captureAnyTagged: boolean;
   /** Comma-separated; `st` takes `#st` and `#st/IS-07`. */
   captureTags: string;
+  /** MEETING-CAPTURE: capture a note by itself once it has sat still, rather
+   *  than waiting for the command. Off by default (RU-035): it files into
+   *  somebody's workspace with nobody pressing anything. */
+  autoCapture: boolean;
+  /** NOTE PAGES: the folders whose notes are sent whole, as pages (pages.ts).
+   *  Comma-separated. Empty by default (RU-035): it sends note text off the
+   *  machine. A note holding a routing heading is a page whatever this says. */
+  pageFolders: string;
+  /** NOTE PAGES: each path sent, with the fingerprint of the text last sent -
+   *  so an unchanged note is not sent again and a delete is known to matter. */
+  pagesSent: Record<string, string>;
   /** OC6: the last status the vault and Graphite AGREED on, per record id —
    *  the base of the three-way merge (vault-tick.ts). Kept here, on the
    *  vault, because it is a fact about this vault's lines: another vault
@@ -345,6 +402,18 @@ interface LpSettings {
    *  two in step. Off until he asks for the note: a plugin that drops a
    *  file into every vault unasked is not one a household installs twice. */
   configFile: boolean;
+  /** THE GRAPHITE BAR: show the toolbar row above a note. The buttons are
+   *  commands whatever this says, so a phone's own toolbar can hold them. */
+  barOn: boolean;
+  /** The words a started list's heading is given. */
+  barHeading: string;
+  /** Write the lists the pickers use into the vault while connected, so a
+   *  device with the plugin and no sign-in (a tablet) can use them. Names
+   *  only, never a secret. */
+  barShare: boolean;
+  /** What the pickers offer that only Graphite knows — spaces, people, tags —
+   *  as last built while connected (toolbar-lists.ts). Worth nothing if lost. */
+  toolbarCache: ToolbarLists | null;
 }
 
 /* R-1512 — WHAT A VAULT LOOKS LIKE BEFORE ANYBODY CHANGES A SETTING.
@@ -360,20 +429,27 @@ interface LpSettings {
  * A default is an answer to "what did you build this for". This one said
  * "an archive", and he asked for a vault twice. */
 const DEFAULTS: LpSettings = {
-  serverUrl: '', token: '', files: {}, autoPush: false, hideIds: true,
+  source: 'server', serverUrl: '', token: '', files: {}, bases: {}, autoPush: false, hideIds: true,
   layout: 'folder', vaultId: '',
-  captureAnyTagged: false, captureTags: '', ticks: {}, censusOn: false,
+  captureAnyTagged: false, captureTags: '', autoCapture: false, pageFolders: '', pagesSent: {}, ticks: {}, censusOn: false,
   agentOn: false, agentFolders: '', routingList: null,
   routeCache: [], routeRecent: [],
   noteSync: 'off', couchUrl: '', couchDb: '', couchUser: '', couchPassword: '', liveSync: true,
   couchPassphrase: '', noteSyncState: emptyNoteSyncState(),
   configFile: false,
+  barOn: true, barHeading: 'Actions', barShare: true, toolbarCache: null,
 };
 
 /** The header the server reads the vault identity from: VAULT_HEADER in
  *  vault-wall.ts, spelled here because importing that file would bundle the
  *  server framework into the plugin. vault-wall.spec holds the two equal. */
 const VAULT_HEADER = 'x-graphite-vault';
+
+/** Where a request goes in a vault that reads Graphite from the device: a
+ *  port nothing listens on. Nothing is meant to ask in that mode; if some
+ *  path forgot to check, it fails at once instead of reaching a server the
+ *  vault was once set to. */
+const NO_SERVER = 'http://127.0.0.1:1';
 
 /** A version-4 UUID. `crypto.randomUUID` where the runtime has it, and the
  *  same 122 random bits by hand where it does not (an older mobile
@@ -401,6 +477,16 @@ interface VaultBinding {
  *  the server, imported rather than copied (R-1517: a copy that did not know
  *  about the block anchor would restamp `| lp: t1 ^t1` as a second marker). */
 const CAPTURE_MARKER = LP_TAIL;
+
+/** R-062: a line as the INSTALLED server reads it. A `| gr: <id>` marker is
+ *  sent as the `| lp: <id>` it is, because a v0.1.0 server knows only lp and
+ *  would take a gr line for one nobody captured — and make a second task for
+ *  it. The file itself is not touched. Same length, so every offset holds. */
+export function asServerSpelling(line: string): string {
+  const m = CAPTURE_MARKER.exec(line);
+  if (!m) return line;
+  return line.slice(0, m.index) + m[0].replace(/^(\s*\|\s*)gr:/, '$1lp:') + line.slice(m.index + m[0].length);
+}
 
 /** A line capture may send: a task line. */
 const CAPTURE_TASK_LINE = /^\s*[-*]\s+\[( |x|X)\]\s*\S/;
@@ -465,21 +551,30 @@ export function stampCaptured(line: string, id: string): string {
  * every push-canonicalize, so anything written in the block was gone at the
  * next sync. That is silent data loss on the one line of the file that
  * invites you to write. */
-const FF_START = '<!-- lp-freeform:start -->';
-const FF_END = '<!-- lp-freeform:end -->';
+/** R-062: where the first of the spellings occurs at or after `from`. The
+ *  block is READ in either; the text kept is put back into the server's
+ *  fresh export in whichever spelling THAT used (the server still writes lp). */
+function firstOf(text: string, marks: readonly string[], from: number): { at: number; len: number } | null {
+  let best: { at: number; len: number } | null = null;
+  for (const m of marks) {
+    const at = text.indexOf(m, from);
+    if (at >= 0 && (!best || at < best.at)) best = { at, len: m.length };
+  }
+  return best;
+}
 
-function keepFreeform(old: string | null, fresh: string): string {
+export function keepFreeform(old: string | null, fresh: string): string {
   if (!old) return fresh;
-  const a = old.indexOf(FF_START);
-  if (a < 0) return fresh;
-  const b = old.indexOf(FF_END, a + FF_START.length);
-  if (b < 0) return fresh;
-  const kept = old.slice(a + FF_START.length, b);
-  const fa = fresh.indexOf(FF_START);
-  if (fa < 0) return fresh;
-  const fb = fresh.indexOf(FF_END, fa + FF_START.length);
-  if (fb < 0) return fresh;
-  return fresh.slice(0, fa + FF_START.length) + kept + fresh.slice(fb);
+  const a = firstOf(old, FF_STARTS, 0);
+  if (!a) return fresh;
+  const b = firstOf(old, FF_ENDS, a.at + a.len);
+  if (!b) return fresh;
+  const kept = old.slice(a.at + a.len, b.at);
+  const fa = firstOf(fresh, FF_STARTS, 0);
+  if (!fa) return fresh;
+  const fb = firstOf(fresh, FF_ENDS, fa.at + fa.len);
+  if (!fb) return fresh;
+  return fresh.slice(0, fa.at + fa.len) + kept + fresh.slice(fb.at);
 }
 
 /* ── id-marker hiding (R-361) ─────────────────────────────────────────────
@@ -616,6 +711,56 @@ function importerSaid(report: any): string[] {
   return shown;
 }
 
+/** ROW 2514: the limits of the base store. A base is a whole note, kept so the
+ *  next push can say what the note looked like when the server last wrote
+ *  it; a vault of thousands of notes must not turn data.json into a copy of
+ *  the vault. Past either cap the oldest bases go, and a note without one
+ *  pushes as it did before bases existed. */
+const BASE_MAX_NOTES = 400;
+const BASE_MAX_CHARS = 4_000_000;
+const BASE_MAX_ONE = 400_000;
+
+/** Put one base in, newest last, and evict from the front past the caps. A
+ *  note too large to keep has no base, and loses any older one: a stale
+ *  base is worse than none, it would name the wrong text as last seen. */
+function putBase(bases: Record<string, string>, path: string, text: string): void {
+  delete bases[path];
+  if (text.length > BASE_MAX_ONE) return;
+  bases[path] = text;
+  const keys = Object.keys(bases);
+  let total = keys.reduce((n, k) => n + bases[k].length, 0);
+  while (keys.length > 1 && (keys.length > BASE_MAX_NOTES || total > BASE_MAX_CHARS)) {
+    const oldest = keys.shift() as string;
+    total -= bases[oldest].length;
+    delete bases[oldest];
+  }
+}
+
+type HeldField = { kind: string; label?: string; field: string };
+
+/** ROW 2514: the fields a push held, from the importer answer. A link row
+ *  held (kind link) is another thing, counted by linksHeld and said by
+ *  importerSaid, so it is not counted here as well. */
+function heldFieldsOf(report: any): HeldField[] {
+  const list = Array.isArray(report?.conflicts) ? report.conflicts : [];
+  return list.filter((c: any) => c && typeof c === 'object' && c.kind !== 'link');
+}
+
+/** The notice lines for held fields, in plain words: how many, which three,
+ *  and that the decision is in the app. The note keeps the app value
+ *  meanwhile because a push writes the server text back over the file. */
+function heldFieldsSaid(held: HeldField[]): string[] {
+  if (!held.length) return [];
+  const n = held.length;
+  const out = [`${n} field${n === 1 ? '' : 's'} held — changed here and in the app. Decide in the Graphite app; this note keeps the app value for now.`];
+  for (const c of held.slice(0, 3)) {
+    const who = String(c.label ?? '').trim();
+    out.push(`${who ? `${who.length > 60 ? `${who.slice(0, 57)}…` : who} — ` : ''}${c.field}`);
+  }
+  if (n > 3) out.push(`…and ${n - 3} more.`);
+  return out;
+}
+
 /** djb2 — cheap content fingerprint, only ever compared to itself. */
 function hash(s: string): string {
   let x = 5381;
@@ -686,7 +831,7 @@ export default class GraphitePlugin extends Plugin {
    *  when. null with a report is a list that could not be had — said as
    *  that, never as an empty list, which would read "no other devices". */
   devices: DeviceEntry[] | null = null;
-  devicesReport: null | 'old-server' | 'refused' | 'failed' = null;
+  devicesReport: null | 'old-server' | 'refused' | 'failed' | 'device' = null;
 
   /** REGISTER 1527: what the server said about the oldest plugin it
    *  accepts, read off GET /health. null until a server has answered. */
@@ -742,8 +887,10 @@ export default class GraphitePlugin extends Plugin {
       // alone in any table that is not the mirror's.
       for (const table of Array.from(el.querySelectorAll('table'))) {
         const heads = Array.from(table.querySelectorAll('th'));
-        const at = heads.findIndex((h) => (h.textContent ?? '').trim() === 'lp');
-        if (at < 0 || at !== heads.length - 1) continue;
+        // The LAST header only: a person's own column headed `gr` earlier in
+        // the table is theirs, and must not stop the mirror's from hiding.
+        const at = heads.length - 1;
+        if (at < 0 || !isMarkerHeaderCell(heads[at].textContent ?? '')) continue;
         for (const row of Array.from(table.querySelectorAll('tr'))) {
           const cells = Array.from(row.children) as HTMLElement[];
           if (cells.length === heads.length) cells[at].remove();
@@ -845,6 +992,48 @@ export default class GraphitePlugin extends Plugin {
       if (!(f instanceof TFile) || this.settings.files[f.path]) return;
       void this.app.vault.read(f).then((text) => this.tickSoon(f, text));
     }));
+    // MEETING-CAPTURE: "Capture automatically". A note written here, or one
+    // that sync brings in from another device (a tablet in a meeting), is
+    // captured once it has sat still, so a line is never stamped while it
+    // is still being written. Same gates as the command: an inbox, never a
+    // synced note, never the plugin's own write.
+    const captureSoon = (f: unknown) => {
+      if (!this.settings.autoCapture || !this.captureOn || this.writingBack > 0) return;
+      if (!(f instanceof TFile) || f.extension !== 'md') return;
+      if (this.settings.files[f.path] || isAgentFile(f.path) || f.path === SETTINGS_NOTE_PATH) return;
+      this.autoCaptureSoon(f);
+    };
+    this.registerEvent(this.app.vault.on('modify', captureSoon));
+    this.registerEvent(this.app.vault.on('create', captureSoon));
+    // NOTE PAGES: a note that is a page is sent whole, on the same quiet-wait
+    // (pages.ts says what makes one and when it goes).
+    this.pages = new PageSync({
+      on: () => this.captureOn && !this.onDevice,
+      folders: () => this.settings.pageFolders,
+      vaultName: () => this.app.vault.getName(),
+      excluded: (p) => !!this.settings.files[p] || isAgentFile(p) || p === SETTINGS_NOTE_PATH || p.startsWith('.'),
+      isOpen: (p) => this.app.workspace.getActiveFile()?.path === p,
+      read: async (p) => {
+        const f = this.app.vault.getAbstractFileByPath(p);
+        return f instanceof TFile ? this.app.vault.read(f) : null;
+      },
+      send: async (method, body) => {
+        const q = method === 'DELETE' ? `?path=${encodeURIComponent(String(body.path))}` : '';
+        const res = await requestUrl({
+          url: this.api(`/mirror/pages${q}`), method, headers: this.headers, throw: false,
+          ...(method === 'PUT' ? { contentType: 'application/json', body: JSON.stringify(body) } : {}),
+        });
+        return { status: res.status, message: (res.json as { message?: string } | null)?.message };
+      },
+      sent: this.settings.pagesSent,
+      save: () => this.saveSettings(),
+      say: (m) => void new Notice(m, 10000),
+      delay: () => this.autoCaptureDelay,
+      watch: (ev, cb) => this.registerEvent(this.app.vault.on(ev as 'modify', cb)),
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (t) => window.clearTimeout(t as number),
+    });
+    this.pages.register();
 
     /* ══ OC3 — ROUTE A LINE (palette and a bindable hotkey) ══════════════
      * The same list and the same insert as `>>`, for a phone, or for a
@@ -863,6 +1052,21 @@ export default class GraphitePlugin extends Plugin {
       name: 'Make these tasks',
       editorCallback: (editor: Editor) => this.makeTasksIn(editor),
     });
+    this.registerBarCommands();
+    // The lists a connected device wrote, read by one with no sign-in: on
+    // load, when the file arrives or changes, and again whenever a picker
+    // opens (barLists), because a synced file does not always raise an event.
+    void this.adoptToolbarLists();
+    // The bar follows the panes: a note opening, a pane moving, a layout
+    // change. Drawing is idempotent, so any of them may call it.
+    this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.syncBars()));
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.syncBars()));
+    this.registerEvent(this.app.workspace.on('file-open', () => this.syncBars()));
+    this.app.workspace.onLayoutReady(() => this.syncBars());
+    const adopt = (f: unknown) => { if ((f as { path?: string } | null)?.path === TOOLBAR_LISTS_PATH) void this.adoptToolbarLists(); };
+    this.registerEvent(this.app.vault.on('modify', adopt));
+    this.registerEvent(this.app.vault.on('create', adopt));
+    this.registerInterval(window.setInterval(() => void this.publishToolbarLists(), 3_600_000));
     /* ══ OC4 — APPROVE: the command (two of them) and the panel ════════ */
     this.addCommand({
       id: 'lp-approve-line',
@@ -941,8 +1145,23 @@ export default class GraphitePlugin extends Plugin {
     });
     this.registerEvent(this.app.vault.on('modify', () => this.noteSyncSoon()));
     this.registerEvent(this.app.vault.on('create', () => this.noteSyncSoon()));
-    this.registerEvent(this.app.vault.on('delete', () => this.noteSyncSoon()));
-    this.registerEvent(this.app.vault.on('rename', () => this.noteSyncSoon()));
+    // ROW 2514: a note deleted or renamed here has no file at the old path,
+    // so its base goes (the entry stays, as it always has, shown as missing).
+    this.registerEvent(this.app.vault.on('delete', (f: unknown) => {
+      const gone = (f as { path?: string } | null)?.path;
+      if (gone && this.settings.bases[gone] !== undefined) {
+        delete this.settings.bases[gone];
+        void this.saveSettings();
+      }
+      this.noteSyncSoon();
+    }));
+    this.registerEvent(this.app.vault.on('rename', (_f: unknown, from: string) => {
+      if (typeof from === 'string' && this.settings.bases[from] !== undefined) {
+        delete this.settings.bases[from];
+        void this.saveSettings();
+      }
+      this.noteSyncSoon();
+    }));
     const ws = this.app.workspace as { onLayoutReady?: (fn: () => void) => void };
     if (typeof ws.onLayoutReady === 'function') {
       ws.onLayoutReady(() => void this.openSettingsNote());
@@ -1289,8 +1508,84 @@ export default class GraphitePlugin extends Plugin {
     Object.values(this.gestureTimers).forEach((t) => window.clearTimeout(t));
   }
 
+  /* ══ THIS DEVICE ═════════════════════════════════════════════════════════
+   *
+   * One switch, `source`, says whether this vault gets Graphite from a server
+   * or from the Graphite app on the same device. On a device nothing is
+   * asked of anything: the app writes the notes into the vault when it is
+   * opened and takes in what the vault changed (device-mirror.ts says what
+   * this plugin reads of that). So no request is ever made in this mode, and
+   * what needs a server is stopped HERE, with a sentence, by `needsServer` —
+   * a person never reads a raw failure from a call that was never going to
+   * be made. */
+
+  get onDevice(): boolean { return this.settings.source === 'device'; }
+
+  /** What the vault last said the app left in it. Null until looked at. */
+  mirrorLook: MirrorLook | null = null;
+
+  /** Look in the vault for what the app wrote. Reads files and nothing else. */
+  async lookAtMirror(): Promise<MirrorLook> {
+    const a = this.app.vault.adapter;
+    this.mirrorLook = await lookForMirror({
+      list: (dir) => a.list(dir),
+      read: (path) => a.read(path),
+      mtime: async (path) => (await a.stat(path))?.mtime ?? null,
+    });
+    return this.mirrorLook;
+  }
+
+  /** Where requests go and the key they carry, or null when there is
+   *  nowhere to send them. A device has no server to send anything to. */
+  endpoint(): { base: string; token: string } | null {
+    if (this.onDevice) return null;
+    if (!this.settings.serverUrl || !this.settings.token) return null;
+    return { base: this.settings.serverUrl.replace(/\/+$/, ''), token: this.settings.token };
+  }
+
+  /** Whether there is somewhere to ask. */
+  get configured(): boolean { return this.endpoint() !== null; }
+
+  /** What to say when there is not: a short form for the status bar and the
+   *  sentence for a Notice. */
+  notConfigured(): { short: string; long: string } {
+    if (this.onDevice) {
+      return {
+        short: mirrorShort(this.mirrorLook),
+        long: 'this vault reads Graphite from the Graphite app on this device, which writes the '
+          + 'notes into the vault itself. There is nothing to pull or push here.',
+      };
+    }
+    return { short: 'not configured', long: 'set the server URL and API token in settings first.' };
+  }
+
+  /** Said when a connection check fails, for the pull and add commands. */
+  noConnectionNote(): string {
+    return this.onDevice
+      ? `Graphite: ${this.notConfigured().long}`
+      : 'Graphite: no connection — check the server URL and token in settings.';
+  }
+
+  /** A feature that needs a server, asked for while this vault reads from
+   *  the Graphite app on this device. True means it was said and the caller
+   *  stops. Said once a session when `loud` is false, for the ones that run
+   *  on their own (a ticked box, a census). */
+  needsServer(what: string, loud = true): boolean {
+    if (!this.onDevice) return false;
+    if (loud || !this.toldDevice.has(what)) {
+      new Notice(`Graphite: ${what} needs a Graphite server. The Graphite app on this `
+        + 'device does not do it for a notes app, so nothing was changed.', 10000);
+      this.toldDevice.add(what);
+    }
+    return true;
+  }
+  private toldDevice = new Set<string>();
+
   api(path: string) {
-    return `${this.settings.serverUrl.replace(/\/+$/, '')}/api${path}`;
+    const base = this.onDevice
+      ? NO_SERVER
+      : this.settings.serverUrl.replace(/\/+$/, '');
+    return `${base}/api${path}`;
   }
   get headers() {
     // OC2: EVERY request says which vault it came from. The server walls a
@@ -1298,7 +1593,7 @@ export default class GraphitePlugin extends Plugin {
     // from a vault that is not bound — so a write cannot slip past the wall
     // by being sent from a code path that forgot to ask.
     return {
-      Authorization: `Bearer ${this.settings.token}`,
+      Authorization: `Bearer ${this.onDevice ? '' : this.settings.token}`,
       [VAULT_HEADER]: this.settings.vaultId,
     };
   }
@@ -1326,10 +1621,33 @@ export default class GraphitePlugin extends Plugin {
   /** Pings /auth/me (+ /health for the server version). Updates the status
    *  bar and panel; loud=true also raises a Notice. */
   async checkConnection(loud: boolean): Promise<boolean> {
-    if (!this.settings.serverUrl || !this.settings.token) {
+    // On a device there is nothing to connect to: the check is a look at what
+    // the app left in the vault.
+    if (this.onDevice) {
+      this.lastMe = null; this.lastHealth = null;
+      this.setStatus('…', 'checking');
+      let look: MirrorLook;
+      try { look = await this.lookAtMirror(); } catch {
+        this.lastCheck = { at: Date.now(), ok: false, detail: 'could not read this vault' };
+        this.setStatus('could not read this vault', 'bad');
+        if (loud) new Notice('Graphite: this vault could not be read.');
+        this.refreshPanel();
+        return false;
+      }
+      const said = mirrorSentence(look, Date.now(), Platform.isMobile);
+      this.lastCheck = { at: Date.now(), ok: look.folders.length > 0, detail: said };
+      this.setStatus(mirrorShort(look), look.folders.length ? 'ok' : 'bad');
+      if (loud) new Notice(`Graphite: ${said}`, 12000);
+      this.refreshPanel();
+      // A device is not a server: the callers of a check that go on to ask a
+      // server stop here, and say the notes are the app's to write.
+      return false;
+    }
+    if (!this.configured) {
       this.lastMe = null; this.lastHealth = null; this.lastCheck = null;
-      this.setStatus('not configured', 'bad');
-      if (loud) new Notice('Graphite: set the server URL and API token in settings first.');
+      const say = this.notConfigured();
+      this.setStatus(say.short, 'bad');
+      if (loud) new Notice(`Graphite: ${say.long}`);
       this.refreshPanel();
       return false;
     }
@@ -1366,6 +1684,7 @@ export default class GraphitePlugin extends Plugin {
       // connection is: the tick events wait on it.
       void this.fetchBinding().catch(() => undefined);
       if (this.settings.censusOn) void this.reportCensus();
+      void this.publishToolbarListsSoon();
       // OC5 refreshes the routes itself, so it is either/or, not both.
       if (this.settings.agentOn) void this.publishAgentContract();
       else void this.refreshRoutes();
@@ -1468,6 +1787,9 @@ export default class GraphitePlugin extends Plugin {
   /** GET the link log of one record — grouped by module, as the server
    *  answers it, and refused if it arrives in any other shape. */
   async fetchLinkLog(r: RecordRef): Promise<LinkLog> {
+    if (this.onDevice) {
+      throw new Error('link history needs a Graphite server');
+    }
     const res = await requestUrl({
       url: this.api(`/records/${r.kind}/${encodeURIComponent(r.id)}/links`),
       headers: this.headers, throw: false,
@@ -1502,12 +1824,37 @@ export default class GraphitePlugin extends Plugin {
    *  STILL NOT AN ERROR AND STILL NOT A POPUP. Being refused is a correct
    *  outcome for a non-operator; what it is not is an invisible one. */
   async reportVault() {
+    // The app on this device has no folder dropdown of vaults to put this
+    // one in, so there is nothing to report and nothing to say.
+    if (this.onDevice) { this.vaultReport = null; this.refreshPanel(); return; }
     try {
-      const res = await requestUrl({
+      const name = this.app.vault.getName();
+      // ── 2026-11-07: THEIR OWN LIST FIRST, THEN THE OLD OPERATOR ROUTE ───
+      //
+      //  Omar: "all my vaults" - the app lists the vaults a person has
+      //  reported, with this plugin version and when each was last seen.
+      //  POST /mirror/vaults/mine is open to any signed-in account, so it is
+      //  asked FIRST and its answer is the answer. A report by an operator on
+      //  it still reaches the mirror-folder dropdown in the app (the dropdown
+      //  reads what an operator reported), so nothing is asked twice.
+      //
+      //  A server from before that route answers 404, and only then is the
+      //  old operator route tried, exactly as it was - with no version in
+      //  the body, because that server never heard of one. throw: false
+      //  stays on both: a refusal is read from the status, never thrown.
+      const mine = await requestUrl({
+        url: this.api('/mirror/vaults/mine'),
+        method: 'POST',
+        contentType: 'application/json',
+        body: JSON.stringify({ name, pluginVersion: this.manifest?.version }),
+        headers: this.headers,
+        throw: false,
+      });
+      const res = mine.status !== 404 ? mine : await requestUrl({
         url: this.api('/mirror/vaults'),
         method: 'POST',
         contentType: 'application/json',
-        body: JSON.stringify({ name: this.app.vault.getName() }),
+        body: JSON.stringify({ name }),
         headers: this.headers,
         throw: false,
       });
@@ -1523,6 +1870,10 @@ export default class GraphitePlugin extends Plugin {
    *  Asked when the settings tab opens — where a person looks — rather than
    *  on every connection check, which runs on its own every few minutes. */
   async fetchDevices(): Promise<void> {
+    if (this.onDevice) {
+      this.devices = null; this.devicesReport = 'device';
+      return;
+    }
     if (!this.settings.serverUrl || !this.settings.token) {
       this.devices = null; this.devicesReport = null;
       return;
@@ -1555,7 +1906,10 @@ export default class GraphitePlugin extends Plugin {
    *  On a phone, or with no readable vault registry, that is this vault's
    *  own server — Obsidian shows a plugin no other vault there. */
   serversOnThisMachine(): ServerUse[] {
-    const configs = [{ vault: 'This vault', url: this.settings.serverUrl, here: true }];
+    // A vault that reads from the app on this device has no server of its
+    // own to list.
+    const configs: { vault: string; url: string; here: boolean }[] = this.onDevice
+      ? [] : [{ vault: 'This vault', url: this.settings.serverUrl, here: true }];
     if (Platform.isDesktopApp) {
       const req = (window as any).require;
       if (req) {
@@ -1610,7 +1964,31 @@ export default class GraphitePlugin extends Plugin {
    * export; its task lines are records that exist, and capturing them
    * would make a second copy of every task in the vault.
    */
-  async captureVault() {
+  /** MEETING-CAPTURE: how long a note must sit still before it captures by
+   *  itself. A field so a test can shorten it. */
+  autoCaptureDelay = 60_000;
+  /** NOTE PAGES: whole notes sent to Graphite (pages.ts). */
+  pages!: PageSync;
+  private autoCaptureTimers: Record<string, number> = {};
+
+  private autoCaptureSoon(file: TFile) {
+    window.clearTimeout(this.autoCaptureTimers[file.path]);
+    this.autoCaptureTimers[file.path] = window.setTimeout(() => {
+      // Open in the editor means still being written: look again later,
+      // rather than stamping the line under the cursor.
+      if (this.app.workspace.getActiveFile()?.path === file.path) {
+        this.autoCaptureSoon(file);
+        return;
+      }
+      delete this.autoCaptureTimers[file.path];
+      void this.captureVault({ only: [file], quiet: true });
+    }, this.autoCaptureDelay);
+  }
+
+  /** `only`: just these notes (auto-capture); the command reads the whole
+   *  vault. `quiet`: a capture nobody asked for does not say "nothing new". */
+  async captureVault(opts: { only?: TFile[]; quiet?: boolean } = {}) {
+    if (this.needsServer('Capturing tasks from notes', !opts.quiet)) return;
     // OC2: THE INBOX IS THE BINDING'S. Asked once, before the vault is read:
     // a vault that is not bound, or has no inbox, would have every batch
     // refused for the same reason, and the reason is the useful part.
@@ -1638,7 +2016,9 @@ export default class GraphitePlugin extends Plugin {
     }
     // REGISTER 1527: an out-of-date plugin does not capture.
     if (!(await this.writeAllowed('captured'))) return;
-    const files = this.app.vault.getMarkdownFiles()
+    // A note deleted or renamed while it waited is not there to read.
+    const files = (opts.only ?? this.app.vault.getMarkdownFiles())
+      .filter((f) => !opts.only || this.app.vault.getAbstractFileByPath(f.path))
       .filter((f) => !this.settings.files[f.path] && !isAgentFile(f.path));
     let made = 0;
     let lost = 0;
@@ -1648,6 +2028,10 @@ export default class GraphitePlugin extends Plugin {
     let unfiled = 0;
     /** OC3: lines that named a place they cannot go, said per line. */
     const routeRefusals: string[] = [];
+    /** MEETING-CAPTURE: lines that became records but lost a field on the
+     *  way (a name that matched nobody, a date the grammar could not read),
+     *  said per line in the words of the server. */
+    const lineWarnings: string[] = [];
     const tagList = this.settings.captureTags.split(',').map((t) => t.trim()).filter(Boolean);
     const taggedOn = this.settings.captureAnyTagged || tagList.length > 0;
     for (const file of files) {
@@ -1665,9 +2049,16 @@ export default class GraphitePlugin extends Plugin {
       // OC3: the heading each line sits under and the note's `lp_space:`,
       // raw. The server decides what they mean, inside the wall.
       const space = noteSpace(lines);
+      // MEETING-CAPTURE: the day `due: friday` counts from — the note's,
+      // not the day it happens to be captured.
+      const today = noteDay(file.path, text, file.stat?.ctime ?? Date.now());
+      // NOTE PAGES: a note that is a page is sent first, and the capture names
+      // it so the tasks it makes link to it. Null when it is not one, or when
+      // the server would not take it - the lines are captured either way.
+      const pageRef = await this.pages.beforeCapture(file.path);
       const candidates = captureCandidates(lines, taggedOn).map((i) => {
         const section = sectionFor(lines, i);
-        return { text: lines[i], path: file.path, line: i, ...(section ? { section } : {}) };
+        return { text: asServerSpelling(lines[i]), path: file.path, line: i, ...(section ? { section } : {}) };
       });
       // THE CAP IS THE SERVER'S (200 a batch) and this pages to it rather
       // than sending a vault in one request.
@@ -1680,9 +2071,10 @@ export default class GraphitePlugin extends Plugin {
           method: 'POST',
           contentType: 'application/json',
           body: JSON.stringify({
-            lines: slice, note: file.basename,
+            lines: slice, note: file.basename, today,
             ...(taggedOn ? { tagged: { any: this.settings.captureAnyTagged, tags: tagList } } : {}),
             ...(space ? { space } : {}),
+            ...(pageRef ? { page: pageRef } : {}),
           }),
           headers: this.headers,
           throw: false,
@@ -1706,6 +2098,13 @@ export default class GraphitePlugin extends Plugin {
         unfiled += ((res.json as any)?.unfiled ?? []).length;
         for (const r of ((res.json as any)?.refused ?? []) as { line: number; message: string }[]) {
           routeRefusals.push(`${file.basename}:${r.line + 1} — ${r.message}`);
+        }
+        // Only for lines THIS capture made. The server reads every line it is
+        // sent, the ones it skips as captured long ago included, and warns
+        // about each; said again at every capture, it is noise by the third.
+        const madeNow = new Set(created.map((c) => c.line));
+        for (const w of ((res.json as any)?.warnings ?? []) as { line: number; message: string }[]) {
+          if (madeNow.has(w.line)) lineWarnings.push(`${file.basename}:${w.line + 1} — ${w.message}`);
         }
       }
       if (!stamps.size) continue;
@@ -1737,8 +2136,9 @@ export default class GraphitePlugin extends Plugin {
       made ? `${made} task${made === 1 ? '' : 's'}` : '',
       notesMade ? `${notesMade} note${notesMade === 1 ? '' : 's'}` : '',
     ].filter(Boolean).join(' and ');
-    new Notice(said ? `Captured ${said}.`
-      : refused ? 'Graphite: nothing was captured.' : 'Nothing new to capture.');
+    if (said) new Notice(`Captured ${said}.`);
+    else if (refused) new Notice('Graphite: nothing was captured.');
+    else if (!opts.quiet) new Notice('Nothing new to capture.');
     if (unfiled) {
       new Notice(`Graphite: ${unfiled} tagged line${unfiled === 1 ? ' was' : 's were'} not `
         + 'captured — the capture inbox\'s space has no Notes module to put a note in. '
@@ -1756,6 +2156,12 @@ export default class GraphitePlugin extends Plugin {
       new Notice(`Graphite: ${routeRefusals.length} line${routeRefusals.length === 1 ? ' was' : 's were'} `
         + `not captured:\n${routeRefusals.slice(0, 6).join('\n')}`, 15000);
     }
+    if (lineWarnings.length) {
+      // The record exists without the field, so "Captured" alone would
+      // tell a person the assignee or the date had landed.
+      new Notice(`Graphite: ${lineWarnings.length} captured line${lineWarnings.length === 1 ? '' : 's'} `
+        + `did not land as written:\n${lineWarnings.slice(0, 6).join('\n')}`, 15000);
+    }
     if (lost) {
       // The task exists and its line could not be marked, so the next
       // capture would make it again. Said, not swallowed.
@@ -1764,7 +2170,7 @@ export default class GraphitePlugin extends Plugin {
         + 'a duplicate after the next capture.', 12000);
     }
     // OC6: and the boxes of everything captured before, both ways.
-    await this.syncTicks(files);
+    await this.syncTicks(files, { quiet: opts.quiet });
     // OC7: and the census, which a capture has just changed.
     if (this.settings.censusOn) await this.reportCensus();
   }
@@ -1802,6 +2208,7 @@ export default class GraphitePlugin extends Plugin {
   }
 
   async syncTicks(only?: TFile[], opts: { quiet?: boolean } = {}) {
+    if (this.needsServer('Keeping a ticked box in step with Graphite', !opts.quiet)) return;
     const files = (only ?? this.app.vault.getMarkdownFiles())
       .filter((f) => !this.settings.files[f.path] && !isAgentFile(f.path));
     /** Every id's box as the vault shows it. A record on two lines (a line
@@ -1971,6 +2378,7 @@ export default class GraphitePlugin extends Plugin {
       if (opts.loud) new Notice('Graphite: turn on the vault census in the Graphite Sync settings first.');
       return;
     }
+    if (this.needsServer('The vault census', !!opts.loud)) return;
     const today = localDay(Date.now());
     const notes: CensusNote[] = [];
     for (const f of this.app.vault.getMarkdownFiles()) {
@@ -2104,6 +2512,7 @@ export default class GraphitePlugin extends Plugin {
    * vanish silently; it is listed as unreadable and never applied.
    */
   async approveProposals(file: TFile, which: string[] | 'all' | 'gestures') {
+    if (this.needsServer('Approving a proposal', which !== 'gestures')) return;
     if (this.settings.files[file.path]) {
       new Notice('Graphite: proposals in a synced note are not applied — that note is '
         + 'rewritten from the app on every sync. Move the line to another note.', 10000);
@@ -2221,7 +2630,7 @@ export default class GraphitePlugin extends Plugin {
    *  parent, tags, state, role and modules — so the picker never asks a
    *  module route for anything. */
   async refreshRoutes(): Promise<boolean> {
-    if (!this.settings.serverUrl || !this.settings.token) return false;
+    if (!this.configured) return false;
     try {
       const res = await requestUrl({ url: this.api('/spaces'), headers: this.headers, throw: false });
       if (res.status >= 300 || !Array.isArray(res.json)) return false;
@@ -2275,6 +2684,427 @@ export default class GraphitePlugin extends Plugin {
     new Notice(`Graphite: ${changed} bullet${changed === 1 ? '' : 's'} made into task${changed === 1 ? '' : 's'}. They are captured on the next capture.`);
   }
 
+  /* ══ THE GRAPHITE BAR · EVERY BUTTON IS A COMMAND ═══════════════════════
+   *
+   * Omar, 2026-11-07: "okay the full set is approved". Task, Due, Assign,
+   * Priority, Tag and Send to write the grammar the capture door already reads
+   * onto the line under the cursor (toolbar-lines.ts); nothing is held about a
+   * line, so the note means the same thing next month. They are registered as
+   * commands first and drawn as buttons second, which is what lets a phone or
+   * a tablet put them on Obsidian's own mobile toolbar.
+   *
+   * NOT IN A SYNCED FILE: its lines are regenerated from the app. NOT ON A
+   * LINE ALREADY CAPTURED: the app owns its fields now, and the next capture
+   * skips it. Both are said, never silently ignored.
+   *
+   * A command returns its promise so the suite can wait for it; Obsidian
+   * ignores what an editor command returns. */
+  private registerBarCommands() {
+    const bar: [string, string, (e: Editor) => Promise<void> | void][] = [
+      ['start-list', 'Start a list', (e) => this.barStartList(e)],
+      ['task', 'Task', (e) => this.barTask(e)],
+      ['due', 'Due', (e) => this.barDue(e)],
+      ['assign', 'Assign', (e) => this.barAssign(e)],
+      ['priority', 'Priority', (e) => this.barPriority(e)],
+      ['tag', 'Tag', (e) => this.barTag(e)],
+      ['send-to', 'Send to', (e) => this.barSendTo(e)],
+    ];
+    this.addCommand({ id: 'lp-bar-capture-now', name: 'Graphite bar: Capture now', callback: () => this.barCaptureNow() });
+    this.addCommand({
+      id: 'lp-bar-publish-lists',
+      name: 'Publish the picker lists for devices with no sign-in',
+      callback: () => this.publishToolbarLists({ loud: true }),
+    });
+    for (const [id, name, run] of bar) {
+      this.addCommand({ id: `lp-bar-${id}`, name: `Graphite bar: ${name}`, editorCallback: (editor: Editor) => run(editor) });
+    }
+  }
+
+  /** The note of the pane whose button is running, so a bar in a split pane
+   *  acts on its own note and not on whichever pane has the cursor. */
+  private barFile: TFile | null = null;
+
+  /** Draw the bar in every note that wants one, and take it from the rest.
+   *  Idempotent: a pane that has its bar keeps it, so any event may call this. */
+  syncBars() {
+    for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+      const view: any = leaf.view;
+      const host: HTMLElement | undefined = view?.contentEl;
+      if (!host) continue;
+      const path: string | undefined = view.file?.path;
+      const want = barWanted({
+        on: this.settings.barOn, path,
+        synced: !!path && !!this.settings.files[path],
+        own: !!path && (isAgentFile(path) || isToolbarFile(path) || path === SETTINGS_NOTE_PATH),
+      });
+      const have = (Array.from(host.children) as HTMLElement[]).filter((c) => c.hasClass?.('gr-bar'));
+      if (!want) { have.forEach((b) => b.detach()); continue; }
+      have.slice(1).forEach((b) => b.detach());
+      if (have.length) continue;
+      const pane: BarPane = {
+        editor: view.editor,
+        getMode: () => view.getMode?.(),
+        file: () => (view.file as TFile) ?? null,
+      };
+      const bar = drawBar(host, pane, { mobile: this.barMobile, run: (id, p) => this.runBar(id, p) });
+      // On a desktop the row is above the note; on a phone or tablet it is
+      // below, where a thumb is (drawBar appended it).
+      if (!this.barMobile && host.firstChild && host.firstChild !== bar) host.insertBefore(bar, host.firstChild);
+    }
+  }
+
+  /** A press on the bar: the command behind the button, against the pane the
+   *  bar belongs to. */
+  private async runBar(id: string, pane: BarPane) {
+    if (pane.getMode?.() === 'preview') {
+      new Notice('Graphite: switch this note to editing to use the bar.');
+      return;
+    }
+    const e = pane.editor;
+    this.barFile = pane.file?.() ?? null;
+    try {
+      switch (id) {
+        case 'start-list': await this.barStartList(e); break;
+        case 'task': await this.barTask(e); break;
+        case 'due': await this.barDue(e); break;
+        case 'assign': await this.barAssign(e); break;
+        case 'priority': await this.barPriority(e); break;
+        case 'tag': await this.barTag(e); break;
+        case 'send-to': await this.barSendTo(e); break;
+        case 'capture-now': await this.barCaptureNow(); break;
+        default: break;
+      }
+    } finally { this.barFile = null; }
+  }
+
+  /** Capture this note now. A device with no sign-in cannot, and says whose
+   *  job it is: the PC captures once the sync brings the note over. */
+  async barCaptureNow() {
+    if (!this.configured) {
+      new Notice('Graphite: this device has no sign-in, so your PC captures this note once your sync brings it over.');
+      return;
+    }
+    const file = this.barFile ?? this.app.workspace.getActiveFile();
+    await this.captureVault(file instanceof TFile ? { only: [file] } : {});
+  }
+
+  /** The note under the cursor as the bar reads it, or null (and said) in a
+   *  synced Graphite file. */
+  private barNote(editor: Editor): { file: TFile | null; lines: string[]; line: number; day: string } | null {
+    const file = this.barFile ?? this.app.workspace.getActiveFile();
+    if (file && this.settings.files[file.path]) {
+      new Notice('Graphite: the bar does not work in a synced Graphite file — its lines are records, and the app is where they change.');
+      return null;
+    }
+    const lines = Array.from({ length: editor.lineCount() }, (_, i) => editor.getLine(i));
+    return {
+      file, lines, line: editor.getCursor().line,
+      day: noteDay(file?.path ?? '', lines.join('\n'), file?.stat?.ctime ?? Date.now()),
+    };
+  }
+
+  /** A line a field may be written onto: said, and null, when the app owns it. */
+  private barFieldLine(note: { lines: string[]; line: number }): string | null {
+    const text = note.lines[note.line] ?? '';
+    if (isCaptured(text)) {
+      new Notice('Graphite: this line is already in Graphite — change its fields in the app, where the record lives.');
+      return null;
+    }
+    return text;
+  }
+
+  /** Put [text] on line [line], leaving the cursor at its end. */
+  private barWrite(editor: Editor, line: number, text: string) {
+    const old = editor.getLine(line) ?? '';
+    editor.replaceRange(text, { line, ch: 0 }, { line, ch: old.length });
+    editor.setCursor({ line, ch: text.length });
+  }
+
+  /** Where a popover opens: under the cursor, where the editor can say. */
+  private barAnchor(editor: Editor): Anchor | null {
+    try {
+      const cm: any = (editor as any).cm;
+      const at = cm?.coordsAtPos?.(editor.posToOffset(editor.getCursor()));
+      return at ? { x: at.left, y: at.bottom + 4 } : null;
+    } catch { return null; }
+  }
+
+  private get barMobile(): boolean { return Platform.isMobile; }
+
+  /** The lists, from the cache; a first use waits for one build. */
+  private async barLists(): Promise<ToolbarLists | null> {
+    if (!this.configured) await this.adoptToolbarLists();
+    else if (!this.settings.toolbarCache) await this.refreshToolbarLists();
+    return this.settings.toolbarCache;
+  }
+
+  async barTask(editor: Editor) {
+    const note = this.barNote(editor);
+    if (!note) return;
+    const text = note.lines[note.line] ?? '';
+    if (/^\s*[-*]\s+\[[ xX-]\]\s?\S/.test(text)) {
+      editor.replaceRange(`\n${nextTaskLine(text)}`, { line: note.line, ch: text.length });
+      editor.setCursor({ line: note.line + 1, ch: nextTaskLine(text).length });
+      return;
+    }
+    this.barWrite(editor, note.line, asTaskLine(text));
+  }
+
+  async barDue(editor: Editor) {
+    const note = this.barNote(editor);
+    const text = note && this.barFieldLine(note);
+    if (!note || text === null) return;
+    const line = note.line;
+    new DueModal(this.app, this.barMobile, this.barAnchor(editor), {
+      noteDay: note.day,
+      words: asTaskLine(text).replace(/^\s*[-*]\s+\[[ xX-]\]\s?/, '').split(' | ')[0].replace(/\s*#\S+/g, '').trim(),
+      current: readDue(readField(text, 'due')),
+      onSet: (value) => this.barWrite(editor, line, setField(asTaskLine(editor.getLine(line) ?? ''), 'due', value)),
+    }).open();
+  }
+
+  async barAssign(editor: Editor) {
+    const note = this.barNote(editor);
+    const text = note && this.barFieldLine(note);
+    if (!note || text === null) return;
+    const lists = await this.barLists();
+    const dest = destinationOf(note.lines, note.line, this.routes(), lists?.bound.inboxModuleId ?? null);
+    if (!dest.route) {
+      new Notice('Graphite: this line does not name a space, and the vault has no capture inbox to fall back on, so there is nobody to offer. Send it somewhere first.');
+      return;
+    }
+    const leaf = dest.route.path[dest.route.path.length - 1];
+    const people = lists?.people[dest.route.spaceId] ?? [];
+    if (!people.length) {
+      new Notice(`Graphite: no people are known for ${leaf} yet. Connect to Graphite once and they are kept.`);
+      return;
+    }
+    const me = this.lastMe?.name;
+    const line = note.line;
+    new PickModal<ToolbarPerson>(this.app, this.barMobile, this.barAnchor(editor), {
+      title: `Assign to someone in ${leaf}`,
+      items: people.map((p): PickItem<ToolbarPerson> => ({
+        label: p.name, color: p.color ?? '', hint: me && p.name === me ? 'you' : undefined, data: p,
+      })),
+      writes: (i) => `Writes | assigned: ${i.data.name}`,
+      onChoose: (i) => this.barWrite(editor, line, setField(asTaskLine(editor.getLine(line) ?? ''), 'assigned', i.data.name)),
+    }).open();
+  }
+
+  async barPriority(editor: Editor) {
+    const note = this.barNote(editor);
+    const text = note && this.barFieldLine(note);
+    if (!note || text === null) return;
+    const line = note.line;
+    const current = readField(text, 'priority')?.toLowerCase();
+    new PickModal<string>(this.app, this.barMobile, this.barAnchor(editor), {
+      title: 'Priority',
+      items: PRIORITIES.map((p) => ({
+        label: p[0].toUpperCase() + p.slice(1), hint: p === 'normal' ? 'default' : undefined, data: p,
+      })),
+      start: (i) => i.data === current,
+      writes: (i) => `Writes | priority: ${i.data}`,
+      onChoose: (i) => this.barWrite(editor, line, setField(asTaskLine(editor.getLine(line) ?? ''), 'priority', i.data)),
+    }).open();
+  }
+
+  async barTag(editor: Editor) {
+    const note = this.barNote(editor);
+    const text = note && this.barFieldLine(note);
+    if (!note || text === null) return;
+    const lists = await this.barLists();
+    const tags = lists?.tags ?? [];
+    const line = note.line;
+    new PickModal<string>(this.app, this.barMobile, this.barAnchor(editor), {
+      title: 'Tag',
+      filter: true,
+      items: tags.map((t) => ({ label: `#${t}`, data: t })),
+      extra: (q) => {
+        const t = cleanTag(q);
+        return t && !tags.some((x) => x.toLowerCase() === t.toLowerCase())
+          ? { label: `+ New tag "${t}"`, data: t } : null;
+      },
+      writes: (i) => `Writes #${i.data} at the end of the words`,
+      onChoose: (i) => this.barWrite(editor, line, addTag(asTaskLine(editor.getLine(line) ?? ''), i.data)),
+    }).open();
+  }
+
+  /** START A LIST. What are you writing, then where it goes, then the heading
+   *  the server already routes every line under - `## Actions >> Work / Action
+   *  items` - and a first box with the cursor on it. The notes own space is
+   *  suggested first, else the capture inbox; a vault with no module of the
+   *  kind is told so. Calendar and the rest are shown and marked later. */
+  async barStartList(editor: Editor) {
+    const note = this.barNote(editor);
+    if (!note) return;
+    const lists = await this.barLists();
+    const line = note.line;
+    const kinds: PickItem<ListKind | null>[] = [
+      { label: 'A task list', detail: 'Boxes to tick, each one a task', data: 'tasks' },
+      { label: 'Notes', detail: 'Plain lines that become notes', data: 'notes' },
+      { label: 'Calendar events', hint: 'later', disabled: true, data: null },
+      { label: 'Shopping, reminders, expenses', hint: 'later', disabled: true, data: null },
+    ];
+    new PickModal<ListKind | null>(this.app, this.barMobile, this.barAnchor(editor), {
+      title: 'What are you writing?',
+      items: kinds,
+      onChoose: (k) => { if (k.data) this.barStartWhere(editor, k.data, note.lines, line, lists); },
+    }).open();
+  }
+
+  private barStartWhere(editor: Editor, kind: ListKind, lines: string[], line: number, lists: ToolbarLists | null) {
+    const routes = this.routes();
+    const spaces = lists?.spaces ?? this.settings.routeCache;
+    const inboxId = lists?.bound.inboxModuleId ?? null;
+    const rootId = lists?.bound.rootId ?? null;
+    const targets = listTargets(routes, spaces, kind, rootId);
+    const noun = kind === 'tasks' ? 'Tasks' : 'Notes';
+    if (!targets.length) {
+      new Notice(`Graphite: this vault has no ${noun} modules to put a list in. Add one in Graphite, then try again.`);
+      return;
+    }
+    const dest = destinationOf(lines, line, routes, inboxId);
+    const first = suggestedTarget(targets, dest, inboxId);
+    const rootName = spaces.find((s) => s.id === rootId)?.name;
+    const row = (t: typeof targets[number], group: string, hint?: string): PickItem<typeof targets[number]> => ({
+      label: targetLabel(t), group, hint, data: t,
+    });
+    const items = [
+      ...(first ? [row(first, 'SUGGESTED', dest.via === 'inbox' || dest.via === 'none' || !dest.route ? 'capture inbox' : "this note's space")] : []),
+      ...targets.map((t) => row(t, `ALL ${noun.toUpperCase()} MODULES${rootName ? ` IN ${rootName.toUpperCase()}` : ''}`)),
+    ];
+    let words = this.settings.barHeading || 'Actions';
+    const tidy = (v: string) => v.replace(/[\r\n]+|>>/g, ' ').replace(/\s+/g, ' ').trim() || 'Actions';
+    new PickModal<typeof targets[number]>(this.app, this.barMobile, this.barAnchor(editor), {
+      title: `${kind === 'tasks' ? 'A task list' : 'Notes'}. Where do these ${kind === 'tasks' ? 'tasks' : 'notes'} go?`,
+      filter: true,
+      items,
+      writes: (i, footer) => `Writes ${listStart(tidy(footer), targetToken(i.data, routes), kind)[0]}`,
+      footer: {
+        label: 'Heading', value: words,
+        onChange: (v) => { words = v; this.settings.barHeading = tidy(v); void this.saveSettings(); },
+      },
+      onChoose: (i) => {
+        const block = listStart(tidy(words), targetToken(i.data, routes), kind);
+        const out = insertBlock(lines, line, block);
+        const old = editor.getLine(line) ?? '';
+        if (!old.trim()) {
+          editor.replaceRange(block.join('\n'), { line, ch: 0 }, { line, ch: old.length });
+        } else {
+          editor.replaceRange(`\n\n${block.join('\n')}`, { line, ch: old.length });
+        }
+        editor.setCursor(out.cursor);
+      },
+    }).open();
+  }
+
+  async barSendTo(editor: Editor) {
+    if (!this.barNote(editor)) return;
+    void this.refreshRoutes();
+    new RouteModal(this.app, this, (r) => this.insertRoute(editor, r, editor.getCursor().line)).open();
+  }
+
+  private listsPublishedAt = 0;
+
+  /** On connecting: publish, but not more than once in ten minutes, so a
+   *  flapping connection does not rewrite a file LiveSync is carrying. */
+  private async publishToolbarListsSoon() {
+    if (Date.now() - this.listsPublishedAt < 600_000) return;
+    await this.publishToolbarLists();
+  }
+
+  /** Write the lists into the vault (Graphite/Toolbar lists.json) for a
+   *  device with no sign-in. Only when connected, only when the lists changed
+   *  (so a synced vault is not touched every hour), and when Graphite cannot
+   *  be reached the file stands as it was. Names only: toolbar-lists.ts has
+   *  no field for a token, an address, a vault id or a password. */
+  async publishToolbarLists(opts: { loud?: boolean } = {}) {
+    if (!this.settings.barShare || !this.configured || this.onDevice) {
+      if (opts.loud) new Notice('Graphite: the picker lists are written only while connected, with sharing on in the settings.');
+      return;
+    }
+    this.listsPublishedAt = Date.now();
+    const before = this.settings.toolbarCache;
+    if (!(await this.refreshToolbarLists())) {
+      if (opts.loud) new Notice('Graphite: could not reach Graphite to refresh the picker lists, so the file stands as it was.');
+      return;
+    }
+    // Unchanged lists keep their old stamp, so the file's bytes do not move.
+    if (before && sameLists(before, this.settings.toolbarCache)) this.settings.toolbarCache = before;
+    await this.writeSharedJson(TOOLBAR_LISTS_PATH, listsFile(this.settings.toolbarCache!));
+    if (opts.loud) new Notice(`Graphite: wrote the picker lists to ${TOOLBAR_LISTS_PATH} (${this.settings.toolbarCache!.spaces.length} spaces).`);
+  }
+
+  /** A plain data file in the vault, written only when it changed. Obsidian
+   *  may not index a .json file as a note, so an existing one is found through
+   *  the adapter rather than assumed absent. */
+  private async writeSharedJson(path: string, text: string) {
+    const folder = path.slice(0, path.lastIndexOf('/'));
+    if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder).catch(() => undefined);
+    this.writingBack++;
+    try {
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing instanceof TFile) {
+        if ((await this.app.vault.read(existing)) !== text) await this.app.vault.modify(existing, text);
+        return;
+      }
+      const had = await this.app.vault.adapter.read(path).catch(() => null);
+      if (had === text) return;
+      if (had !== null) await this.app.vault.adapter.write(path, text);
+      else await this.app.vault.create(path, text).catch(() => this.app.vault.adapter.write(path, text));
+    } finally { this.writingBack--; }
+  }
+
+  /** A device with no sign-in takes the lists a connected one wrote. Never on
+   *  a device that has its own server: its lists are its own, and a file from
+   *  another machine must not replace them. Only names are copied
+   *  (readListsFile), so a hand-edited or hostile file adds nothing else. */
+  async adoptToolbarLists(): Promise<boolean> {
+    if (this.configured) return false;
+    const text = await this.app.vault.adapter.read(TOOLBAR_LISTS_PATH).catch(() => null);
+    const lists = text === null ? null : readListsFile(text);
+    if (!lists || sameLists(lists, this.settings.toolbarCache)) return false;
+    this.settings.toolbarCache = lists;
+    this.settings.routeCache = lists.spaces;
+    await this.saveSettings();
+    return true;
+  }
+
+  /** What the pickers offer that only Graphite knows, rebuilt from the server
+   *  and kept: the spaces (the `>>` list too), the people of each, the tags in
+   *  use and the vault's binding. False when it could not be had — the last
+   *  build stands. */
+  async refreshToolbarLists(): Promise<boolean> {
+    if (!this.configured || this.onDevice) return false;
+    if (!(await this.refreshRoutes())) return false;
+    const spaces = this.settings.routeCache;
+    const before = this.settings.toolbarCache;
+    let bound = before?.bound ?? { rootId: null, inboxModuleId: null };
+    try {
+      const b = await this.fetchBinding();
+      if (b) bound = { rootId: b.root?.id ?? null, inboxModuleId: b.inbox?.id ?? null };
+    } catch { /* the last binding stands */ }
+    const people: Record<string, ToolbarPerson[]> = {};
+    for (const s of routable(spaces)) {
+      const mod = (s.modules ?? []).find((m) => m.type === 'TASKS');
+      if (!mod) continue;
+      const res = await requestUrl({ url: this.api(`/spaces/modules/${mod.id}/people`), headers: this.headers, throw: false }).catch(() => null);
+      if (res && res.status < 300 && Array.isArray(res.json)) {
+        people[s.id] = (res.json as any[]).filter((p) => p && typeof p.name === 'string' && p.name)
+          .map((p) => ({ name: p.name as string, color: typeof p.color === 'string' ? p.color : null }));
+      } else if (before?.people[s.id]) people[s.id] = before.people[s.id];
+    }
+    let tags = before?.tags ?? [];
+    const t = await requestUrl({ url: this.api('/tags'), headers: this.headers, throw: false }).catch(() => null);
+    if (t && t.status < 300 && Array.isArray(t.json)) tags = (t.json as { name?: string }[]).map((x) => String(x.name ?? '')).filter(Boolean);
+    this.settings.toolbarCache = buildLists({
+      at: new Date().toISOString(), bound, spaces, people,
+      tags: [...tags, ...spaces.flatMap((s) => s.tags ?? [])],
+    });
+    await this.saveSettings();
+    return true;
+  }
+
   /* ══ R-1525 · CREATE A NEW ENTRY FOR ANYTHING — STARTING WITH A SPACE ═══
    *
    * "if i am in a vault i should be able to see the entities and how they
@@ -2302,6 +3132,7 @@ export default class GraphitePlugin extends Plugin {
       new Notice('Graphite: this note is already part of a synced space — push it instead.');
       return;
     }
+    if (this.needsServer('Making a space from a note')) return;
     const markdown = await this.app.vault.read(file);
     const res = await requestUrl({
       url: this.api('/spaces/import.md'),
@@ -2334,8 +3165,9 @@ export default class GraphitePlugin extends Plugin {
    * the way every other note does. No note is ever turned into a module
    * by being written somewhere. */
   async chooseAndAddModule() {
+    if (this.needsServer('Adding a module')) return;
     if (!(await this.checkConnection(false))) {
-      new Notice('Graphite: no connection — check the server URL and token in settings.');
+      new Notice(this.noConnectionNote());
       return;
     }
     const pickType = (space: SpaceInfo) => new ModuleTypePicker(this.app, (type) =>
@@ -2389,6 +3221,9 @@ export default class GraphitePlugin extends Plugin {
 
   /** The binding, or null when the server is too old to know of one. */
   async fetchBinding(): Promise<VaultBinding | null> {
+    // A vault is bound to a space on a server. The app on this device has
+    // no binding to ask about, which is the same answer an old server gives.
+    if (this.onDevice) { this.captureOn = false; return null; }
     const res = await requestUrl({ url: this.vaultUrl(), headers: this.headers, throw: false });
     if (res.status === 404) {
       this.captureOn = false;
@@ -2403,6 +3238,7 @@ export default class GraphitePlugin extends Plugin {
   /** Bind this vault to a space, or unbind it (null). Says what happened,
    *  including an inbox the new wall no longer holds. */
   async bindVault(rootSpaceId: string | null): Promise<VaultBinding | null> {
+    if (this.needsServer('Binding a vault to a space')) return null;
     const res = rootSpaceId
       ? await requestUrl({
           url: this.vaultUrl(), method: 'PUT', contentType: 'application/json',
@@ -2426,6 +3262,7 @@ export default class GraphitePlugin extends Plugin {
 
   /** The Tasks modules the server would accept as this vault's inbox. */
   async fetchInboxChoices(): Promise<Array<{ id: string; label: string }>> {
+    if (this.onDevice) return [];
     const res = await requestUrl({ url: this.vaultUrl('/inboxes'), headers: this.headers, throw: false });
     if (res.status >= 400) return [];
     return res.json as Array<{ id: string; label: string }>;
@@ -2433,6 +3270,7 @@ export default class GraphitePlugin extends Plugin {
 
   /** Choose (or clear) the capture inbox. */
   async setInbox(moduleId: string | null): Promise<boolean> {
+    if (this.needsServer('Choosing a capture inbox')) return false;
     const res = await requestUrl({
       url: this.vaultUrl('/inbox'), method: 'PUT', contentType: 'application/json',
       body: JSON.stringify({ moduleId }), headers: this.headers, throw: false,
@@ -2455,7 +3293,7 @@ export default class GraphitePlugin extends Plugin {
    *  the pull asks WHICH VAULT the space lands in. */
   async chooseAndPull() {
     if (!(await this.checkConnection(false))) {
-      new Notice('Graphite: no connection — check the server URL and token in settings.');
+      new Notice(this.noConnectionNote());
       return;
     }
     try {
@@ -2468,8 +3306,11 @@ export default class GraphitePlugin extends Plugin {
 
   /** Optional flow: selective modules, always into the current vault. */
   async chooseAndPullSelective() {
+    // The app on this device exports a whole space; a subset of its
+    // modules is the exporter of a server.
+    if (this.needsServer('Choosing modules to pull')) return;
     if (!(await this.checkConnection(false))) {
-      new Notice('Graphite: no connection — check the server URL and token in settings.');
+      new Notice(this.noConnectionNote());
       return;
     }
     try {
@@ -2591,6 +3432,9 @@ export default class GraphitePlugin extends Plugin {
           spaceId: space.id, spaceName: space.name,
           lastSyncAt: Date.now(), lastHash: hash(text), ...extra,
         };
+        // ROW 2514: that vault keeps the base for this note as well.
+        data.bases = data.bases && typeof data.bases === 'object' ? data.bases : {};
+        putBase(data.bases, path, text);
       };
       // R-379: the other vault's copy keeps its freeform block too — for
       // every note of a folder, not only for a package file.
@@ -2714,6 +3558,7 @@ export default class GraphitePlugin extends Plugin {
         moduleIds: effective,
         moduleCount: moduleCount ?? prev?.moduleCount,
       };
+      putBase(this.settings.bases, fileName, text);
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
@@ -2787,6 +3632,7 @@ export default class GraphitePlugin extends Plugin {
             moduleIds: effective,
             moduleCount: moduleCount ?? previous[0]?.entry.moduleCount,
           };
+          putBase(this.settings.bases, f.path, text);
           written.add(f.path);
         }
       } finally {
@@ -2796,7 +3642,10 @@ export default class GraphitePlugin extends Plugin {
       // A note that was RENAMED is not one of them — it is the same note under
       // the name the app now gives it.
       const dropped = previous.filter((p) => !written.has(p.path) && !renamed.has(p.path));
-      for (const d of dropped) delete this.settings.files[d.path];
+      for (const d of dropped) {
+        delete this.settings.files[d.path];
+        delete this.settings.bases[d.path];
+      }
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
@@ -2835,6 +3684,7 @@ export default class GraphitePlugin extends Plugin {
     try {
       await this.app.fileManager.renameFile(file, to);
       delete this.settings.files[from];
+      delete this.settings.bases[from];
     } catch { /* keep the old path; the write below creates the new note */ }
   }
 
@@ -2849,6 +3699,9 @@ export default class GraphitePlugin extends Plugin {
   }
 
   async pushFile(path: string, opts?: { auto?: boolean; force?: boolean }) {
+    // On a device a changed note is not pushed anywhere: the app takes it in
+    // the next time it is opened, and the panel says so.
+    if (this.onDevice) return;
     const entry = this.settings.files[path];
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!entry || !(file instanceof TFile)) return;
@@ -2872,7 +3725,19 @@ export default class GraphitePlugin extends Plugin {
     // its links table is the one place a removed row deletes something — so
     // a stale index pushed over a link drawn in the app since the last sync
     // would break that link. Held exactly as a stale module note is.
-    if (!opts?.force) {
+    //
+    // ROW 2514 (R-2841): WITH A BASE THE SERVER HOLDS PER FIELD, SO THIS WHOLE-
+    // FILE HOLD STANDS DOWN. A push that carries the note as the server last
+    // wrote it (this.settings.bases) is judged by the importer one field at a
+    // time: a field only the vault changed is written, a field only the app
+    // changed is kept (keptNewer), a field BOTH changed is held and asked
+    // about in the app, and a link row is held only if the base had it. That
+    // is every case this check exists for, decided more finely, so a note
+    // the app moved elsewhere lands its own edits instead of being refused
+    // whole. A note with NO base (first push, a data.json from before, a base
+    // dropped for size) has nothing for the server to compare against, so the
+    // old rule stands for it exactly: ask, or hold an auto-push.
+    if (!opts?.force && this.settings.bases[path] === undefined) {
       const state = await this.serverState(path);
       if (state === 'server-changed') {
         if (opts?.auto) {
@@ -2922,11 +3787,17 @@ export default class GraphitePlugin extends Plugin {
       // first, and if this account genuinely lacks the rights, fall back to
       // the one it does have — and SAY which happened, instead of letting a
       // contributor believe their edits landed.
+      // ROW 2514: the base goes only with update_existing, the one mode that
+      // judges a field against it; merge never changes a record.
+      const base = this.settings.bases[path];
       const send = (mode: 'update_existing' | 'merge') => requestUrl({
         url: this.api('/spaces/import.md'),
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markdown, mode, targetSpaceId: entry.spaceId }),
+        body: JSON.stringify({
+          markdown, mode, targetSpaceId: entry.spaceId,
+          ...(mode === 'update_existing' && base !== undefined ? { base } : {}),
+        }),
         throw: false,
       });
       let res = await send('update_existing');
@@ -2956,8 +3827,18 @@ export default class GraphitePlugin extends Plugin {
       // blocked and errors. The vault saw a green notice and the line was
       // gone from the note after canonicalize, with nothing to say why.
       const said = importerSaid(report);
-      if (said.length) {
-        new Notice(`Graphite: pushed, and the importer says:\n${said.map((s) => `• ${s}`).join('\n')}`, 15000);
+      // ROW 2514: a field changed here AND in the app is held, not written
+      // either way. Said first and in one notice with the importer words, so
+      // a held push is one notice and a clean push stays one. Held link rows
+      // are the importer own count (linksHeld) and are not in this one.
+      const heldFields = heldFieldsSaid(heldFieldsOf(report));
+      const bullets = (l: string[]) => l.map((s) => `• ${s}`).join('\n');
+      if (heldFields.length) {
+        new Notice(
+          `Graphite: pushed, but ${heldFields[0]}\n${bullets(heldFields.slice(1))}`
+          + (said.length ? `\nThe importer also says:\n${bullets(said)}` : ''), 15000);
+      } else if (said.length) {
+        new Notice(`Graphite: pushed, and the importer says:\n${bullets(said)}`, 15000);
       }
       // Canonicalize: the server's view becomes the file (same contract as
       // the in-app mirror), scoped to this file — the whole space for a
@@ -2974,6 +3855,10 @@ export default class GraphitePlugin extends Plugin {
       try { await this.app.vault.modify(file, text); } finally { this.writingBack--; }
       entry.lastSyncAt = Date.now();
       entry.lastHash = hash(text);
+      // ROW 2514: the text just written IS what the server last wrote, so it
+      // is the base for the next push. A field held keeps the app value in
+      // it, which is why the next push does not open the same hold again.
+      putBase(this.settings.bases, path, text);
       await this.saveSettings();
       this.refreshPanel();
       new Notice(`Graphite: pushed "${entry.spaceName ?? path}" and canonicalized.`);
@@ -3110,6 +3995,9 @@ export default class GraphitePlugin extends Plugin {
     files.splice(0, files.length, ...edited);
     let changed = false;
     for (const f of files) {
+      // ROW 2514: a note with a base is judged by the server per field (see
+      // pushFile), so only the ones without a base can hold the sweep.
+      if (this.settings.bases[f.path] !== undefined) continue;
       if ((await this.serverState(f.path)) === 'server-changed') {
         changed = true;
         break;
@@ -3128,6 +4016,7 @@ export default class GraphitePlugin extends Plugin {
 
   async forget(path: string) {
     delete this.settings.files[path];
+    delete this.settings.bases[path];
     await this.saveSettings();
     this.refreshPanel();
   }
@@ -3135,7 +4024,10 @@ export default class GraphitePlugin extends Plugin {
   /** Stop syncing a whole space. The notes stay in the vault as ordinary
    *  files — forgetting is a mapping change, never a delete. */
   async forgetSpace(spaceId: string) {
-    for (const f of this.entriesForSpace(spaceId)) delete this.settings.files[f.path];
+    for (const f of this.entriesForSpace(spaceId)) {
+      delete this.settings.files[f.path];
+      delete this.settings.bases[f.path];
+    }
     await this.saveSettings();
     this.refreshPanel();
   }
@@ -3151,6 +4043,15 @@ export default class GraphitePlugin extends Plugin {
     this.settings = { ...DEFAULTS, ...data };
     this.settings.routeCache = Array.isArray(data.routeCache) ? data.routeCache : [];
     this.settings.routeRecent = Array.isArray(data.routeRecent) ? data.routeRecent : [];
+    // ROW 2514: the bases are a store of their own — a copy, text only, and
+    // only for notes still tracked (a base for a path nothing syncs any
+    // more would be sent for a note that is not that one).
+    this.settings.bases = {};
+    if (data.bases && typeof data.bases === 'object') {
+      for (const [k, v] of Object.entries(data.bases)) {
+        if (typeof v === 'string' && this.settings.files[k]) putBase(this.settings.bases, k, v);
+      }
+    }
     // ROW 2375: a state of its own, never the one object DEFAULTS holds.
     const ns = data.noteSyncState;
     this.settings.noteSyncState = ns && typeof ns === 'object' && ns.files && typeof ns.files === 'object'
@@ -3275,7 +4176,7 @@ class ConflictPushModal extends Modal {
         'Pushing now writes this note’s values over the app’s newer ' +
         'edits (the app keeps an undo). Pulling first refreshes the note — ' +
         'if your edits collide, your version is banked beside it.',
-      cls: 'lp-picker-hint',
+      cls: 'gr-picker-hint',
     });
     new Setting(contentEl)
       .addButton((b) => b.setButtonText('Pull first').setCta()
@@ -3352,7 +4253,7 @@ class ModulePicker extends Modal {
     contentEl.createEl('h3', { text: `Sync what from "${this.space.name}"?` });
     contentEl.createEl('p', {
       text: 'Unticked modules stay out of the file — and pushes never touch them.',
-      cls: 'lp-picker-hint',
+      cls: 'gr-picker-hint',
     });
     for (const m of this.modules) {
       new Setting(contentEl)
@@ -3381,7 +4282,7 @@ class LpSyncView extends ItemView {
   getIcon() { return 'refresh-cw'; }
 
   async onOpen() {
-    this.contentEl.addClass('lp-sync-view');
+    this.contentEl.addClass('gr-sync-view');
     await this.plugin.checkConnection(false); // triggers render via refreshPanel
     this.render();
   }
@@ -3391,29 +4292,61 @@ class LpSyncView extends ItemView {
     el.empty();
 
     // ── Header + actions ──────────────────────────────────────────────
-    const head = el.createDiv({ cls: 'lp-sync-head' });
+    const head = el.createDiv({ cls: 'gr-sync-head' });
     head.createEl('h4', { text: 'Graphite sync' });
-    const actions = head.createDiv({ cls: 'lp-sync-actions' });
-    actions.createEl('button', { text: 'Pull a space…' })
-      .addEventListener('click', () => void this.plugin.chooseAndPull());
-    actions.createEl('button', { text: 'Refresh' })
+    const actions = head.createDiv({ cls: 'gr-sync-actions' });
+    // On a device there is nothing to pull: the app writes the notes.
+    if (!this.plugin.onDevice) {
+      actions.createEl('button', { text: 'Pull a space…' })
+        .addEventListener('click', () => void this.plugin.chooseAndPull());
+    }
+    actions.createEl('button', { text: this.plugin.onDevice ? 'Look again' : 'Refresh' })
       .addEventListener('click', () => void this.plugin.checkConnection(false));
 
     // ── Connection ────────────────────────────────────────────────────
-    const conn = el.createDiv({ cls: 'lp-sync-section' });
-    conn.createEl('div', { text: 'CONNECTION', cls: 'lp-sync-label' });
+    const conn = el.createDiv({ cls: 'gr-sync-section' });
+    const onDevice = this.plugin.onDevice;
+    conn.createEl('div', { text: onDevice ? 'THIS DEVICE' : 'CONNECTION', cls: 'gr-sync-label' });
     const me = this.plugin.lastMe;
     const health = this.plugin.lastHealth;
-    if (!this.plugin.settings.serverUrl || !this.plugin.settings.token) {
-      conn.createDiv({ text: 'Not configured — set the server URL and API token in the plugin settings.', cls: 'lp-sync-bad' });
+    if (onDevice) {
+      // Nothing is connected to: the panel says what the app left in this
+      // vault, and what happens to a change made here.
+      const look = this.plugin.mirrorLook;
+      if (!look) {
+        conn.createDiv({ text: 'Looking in this vault…', cls: 'gr-sync-dim' });
+      } else {
+        conn.createDiv({
+          text: `${look.folders.length ? '🟢' : '🔴'} ${mirrorSentence(look, Date.now(), Platform.isMobile)}`,
+          cls: look.folders.length ? '' : 'gr-sync-bad',
+        });
+        if (look.changedHere > 0) {
+          const list = conn.createEl('ul', { cls: 'gr-sync-dim' });
+          for (const f of look.folders) for (const n of f.changedHere.slice(0, 8)) list.createEl('li', { text: n });
+        }
+        conn.createDiv({
+          text: `Looked ${clock(this.plugin.lastCheck?.at ?? Date.now())}. Nothing is sent from here.`,
+          cls: 'gr-sync-dim',
+        });
+      }
+    } else if (!this.plugin.configured) {
+      conn.createDiv({
+        text: 'Not configured — set the server URL and API token in the plugin settings.',
+        cls: 'gr-sync-bad',
+      });
     } else if (me) {
-      conn.createDiv({ text: `🟢 Connected as ${me.name ?? me.email} · ${this.plugin.settings.serverUrl}` });
+      conn.createDiv({
+        text: `🟢 Connected as ${me.name ?? me.email} · ${this.plugin.settings.serverUrl}`,
+      });
       // ROW 2376: "connected" is what the last check found, so it says when.
       const when = this.plugin.lastCheck ? ` · checked ${clock(this.plugin.lastCheck.at)}` : '';
-      conn.createDiv({ text: `Server version ${health?.version ?? 'unknown'}${when}`, cls: 'lp-sync-dim' });
+      conn.createDiv({
+        text: `Server version ${health?.version ?? 'unknown'}${when}`,
+        cls: 'gr-sync-dim',
+      });
       // REGISTER 1527: an out-of-date plugin says so where the connection is.
       const outdated = this.plugin.outdatedNote();
-      if (outdated) conn.createDiv({ text: outdated, cls: 'lp-sync-bad' });
+      if (outdated) conn.createDiv({ text: outdated, cls: 'gr-sync-bad' });
       // R-1500: whether this vault reached the app's folder dropdown. Said
       // HERE rather than as a Notice, because the connection check runs
       // every few minutes and a popup about a settled permission would be
@@ -3423,49 +4356,64 @@ class LpSyncView extends ItemView {
           text: 'This vault is not offered in the app\'s mirror-folder '
             + 'dropdown: naming a vault there is an instance-operator '
             + 'setting. Everything else on this panel works normally.',
-          cls: 'lp-sync-dim',
+          cls: 'gr-sync-dim',
         });
       } else if (this.plugin.vaultReport === 'failed') {
         conn.createDiv({
           text: 'This vault could not be reported to the server, so it may '
             + 'not appear in the app\'s mirror-folder dropdown. An older '
             + 'server does not have that endpoint.',
-          cls: 'lp-sync-dim',
+          cls: 'gr-sync-dim',
         });
       }
     } else {
-      conn.createDiv({ text: `🔴 Not connected · ${this.plugin.settings.serverUrl}`, cls: 'lp-sync-bad' });
-      conn.createDiv({ text: 'Use Refresh (or fix the token in settings).', cls: 'lp-sync-dim' });
+      conn.createDiv({ text: `🔴 Not connected · ${this.plugin.settings.serverUrl}`, cls: 'gr-sync-bad' });
+      conn.createDiv({ text: 'Use Refresh (or fix the token in settings).', cls: 'gr-sync-dim' });
+    }
+
+    // A device has no pull, no push and no proposals to approve: what is left
+    // to say is how the exchange works.
+    if (onDevice) {
+      const how = el.createDiv({ cls: 'gr-sync-section' });
+      how.createEl('div', { text: 'HOW THIS WORKS', cls: 'gr-sync-label' });
+      const ul = how.createEl('ul', { cls: 'gr-sync-how' });
+      for (const line of [
+        'The Graphite app writes your spaces into this vault as notes. It does that whenever the app is opened, and nothing runs in the background.',
+        'Change a line, tick a box or add a task line in a note here, and the app takes it in the next time it is opened, then writes the note again in its own form.',
+        'This plugin only looks. It never sends anything, and it cannot tell whether the app has taken a change in until the app has been opened and has written again.',
+        'To choose which vault the app writes into: in the Graphite app, Settings, Data and server, Data locations.',
+      ]) ul.createEl('li', { text: line });
+      return;
     }
 
     // ── OC4: proposals in the note in front of him ────────────────────
     // The fourth gesture, and the place a person LOOKS for what is waiting.
     // Each proposal shows its state in words; approving one here calls the
     // same transition the command, the tick and the un-italicise call.
-    const props = el.createDiv({ cls: 'lp-sync-section' });
-    props.createEl('div', { text: 'PROPOSALS IN THIS NOTE', cls: 'lp-sync-label' });
+    const props = el.createDiv({ cls: 'gr-sync-section' });
+    props.createEl('div', { text: 'PROPOSALS IN THIS NOTE', cls: 'gr-sync-label' });
     const propsBody = props.createDiv();
-    propsBody.createDiv({ text: '…', cls: 'lp-sync-dim' });
+    propsBody.createDiv({ text: '…', cls: 'gr-sync-dim' });
     void this.plugin.activeProposals().then((a) => {
       propsBody.empty();
       if (!a || !a.list.length) {
-        propsBody.createDiv({ text: 'None. Your agent writes proposals in italic; they wait here until you approve them.', cls: 'lp-sync-dim' });
+        propsBody.createDiv({ text: 'None. Your agent writes proposals in italic; they wait here until you approve them.', cls: 'gr-sync-dim' });
         return;
       }
       const synced = !!this.plugin.settings.files[a.file.path];
       const count = (st: string) => a.list.filter((p) => p.state === st).length;
       propsBody.createDiv({
         text: `${count('proposed')} proposed · ${count('approved')} approving · ${count('unreadable')} unreadable`,
-        cls: 'lp-sync-dim',
+        cls: 'gr-sync-dim',
       });
       for (const p of a.list) {
-        const row = propsBody.createDiv({ cls: `lp-sync-file gr-proposal-row gr-proposal-${p.state}` });
+        const row = propsBody.createDiv({ cls: `gr-sync-file gr-proposal-row gr-proposal-${p.state}` });
         const words = approvedText(a.lines[p.line]).replace(/^\s*[-*+]\s+\[[ xX]\]\s+/, '');
         row.createSpan({ text: words });
         row.createEl('span', {
           text: synced ? 'unreadable · synced note'
             : p.state === 'approved' ? 'approving' : p.state === 'unreadable' ? `unreadable · ${p.reason}` : 'proposed',
-          cls: 'lp-sync-state',
+          cls: 'gr-sync-state',
         });
         if (!synced && p.state !== 'unreadable') {
           row.createEl('button', { text: 'Approve' })
@@ -3482,11 +4430,11 @@ class LpSyncView extends ItemView {
     // R-379: a folder-layout space is many files, so the SPACE is the row and
     // its notes are lines under it. A single-file space is the same shape with
     // exactly one line — one way to read the panel, not two.
-    const filesSec = el.createDiv({ cls: 'lp-sync-section' });
-    filesSec.createEl('div', { text: 'SYNCED SPACES', cls: 'lp-sync-label' });
+    const filesSec = el.createDiv({ cls: 'gr-sync-section' });
+    filesSec.createEl('div', { text: 'SYNCED SPACES', cls: 'gr-sync-label' });
     const paths = Object.keys(this.plugin.settings.files);
     if (paths.length === 0) {
-      filesSec.createDiv({ text: 'Nothing synced into this vault yet — use "Pull a space…".', cls: 'lp-sync-dim' });
+      filesSec.createDiv({ text: 'Nothing synced into this vault yet — use "Pull a space…".', cls: 'gr-sync-dim' });
     }
     const bySpace = new Map<string, string[]>();
     for (const path of paths) {
@@ -3503,8 +4451,8 @@ class LpSyncView extends ItemView {
       });
       const head = this.plugin.settings.files[spacePaths[0]];
       const name = head.spaceName ?? spaceId;
-      const row = filesSec.createDiv({ cls: 'lp-sync-row' });
-      const top = row.createDiv({ cls: 'lp-sync-row-top' });
+      const row = filesSec.createDiv({ cls: 'gr-sync-row' });
+      const top = row.createDiv({ cls: 'gr-sync-row-top' });
       top.createEl('b', { text: name });
       const scope = head.moduleIds?.length
         ? `${head.moduleIds.length}${head.moduleCount ? `/${head.moduleCount}` : ''} modules`
@@ -3512,20 +4460,20 @@ class LpSyncView extends ItemView {
       const where = head.folder ? `${head.folder}/ · ${spacePaths.length} notes` : spacePaths[0];
       row.createDiv({
         text: `${where} · ${scope} · synced ${relTime(head.lastSyncAt)}`,
-        cls: 'lp-sync-dim',
+        cls: 'gr-sync-dim',
       });
 
       for (const path of spacePaths) {
         const entry = this.plugin.settings.files[path];
-        const line = row.createDiv({ cls: 'lp-sync-file' });
+        const line = row.createDiv({ cls: 'gr-sync-file' });
         const label = entry.folder ? path.slice(entry.folder.length + 1) : path;
         line.createSpan({ text: entry.role === 'index' ? `${label} (index)` : label });
-        const stateEl = line.createEl('span', { text: '…', cls: 'lp-sync-state' });
+        const stateEl = line.createEl('span', { text: '…', cls: 'gr-sync-state' });
         void this.plugin.fileState(path).then((s) => {
           stateEl.setText(
             s === 'in-sync' ? '✓ in sync' :
             s === 'local-edits' ? '● local edits' : '⚠ file missing');
-          stateEl.addClass(`lp-state-${s}`);
+          stateEl.addClass(`gr-state-${s}`);
         });
         line.createEl('button', { text: 'Push' })
           .addEventListener('click', () => void this.plugin.pushFile(path));
@@ -3538,7 +4486,7 @@ class LpSyncView extends ItemView {
           }));
       }
 
-      const btns = row.createDiv({ cls: 'lp-sync-row-btns' });
+      const btns = row.createDiv({ cls: 'gr-sync-row-btns' });
       const mk = (label: string, fn: () => void) =>
         btns.createEl('button', { text: label }).addEventListener('click', fn);
       mk('Pull', () => void this.plugin.pullSpace({ id: spaceId, name }));
@@ -3547,10 +4495,10 @@ class LpSyncView extends ItemView {
     }
 
     // ── How this sync works ───────────────────────────────────────────
-    const how = el.createDiv({ cls: 'lp-sync-section' });
-    how.createEl('div', { text: 'HOW THIS SYNC WORKS', cls: 'lp-sync-label' });
+    const how = el.createDiv({ cls: 'gr-sync-section' });
+    how.createEl('div', { text: 'HOW THIS SYNC WORKS', cls: 'gr-sync-label' });
     const auto = this.plugin.settings.autoPush;
-    const ul = how.createEl('ul', { cls: 'lp-sync-how' });
+    const ul = how.createEl('ul', { cls: 'gr-sync-how' });
     const folder = this.plugin.settings.layout === 'folder';
     for (const line of [
       `Mode: ${auto ? 'AUTO-PUSH — tracked files push ~2.5s after you stop editing.' : 'MANUAL — you decide when to Pull and Push (auto-push can be enabled in settings).'}`,
@@ -3575,46 +4523,89 @@ class LpSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    const onDevice = this.plugin.onDevice;
     new Setting(containerEl)
-      .setName('Server URL')
-      .setDesc('e.g. https://graphite.omaryazeedi.com')
-      .addText((t) => t.setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
-        this.plugin.settings.serverUrl = v.trim();
-        await this.plugin.saveSettings();
-      }));
-    new Setting(containerEl)
-      .setName('API token')
-      .setDesc('Generate one in the app: Settings → Where am I signed in? → Generate API token.')
-      .addText((t) => t.setValue(this.plugin.settings.token).onChange(async (v) => {
-        this.plugin.settings.token = v.trim();
-        await this.plugin.saveSettings();
-      }));
+      .setName('Where Graphite is')
+      .setDesc('A server, or the Graphite app on this device. "This device" needs no server and no '
+        + 'account: the Graphite app writes your spaces into this vault as notes whenever it is opened, '
+        + 'and takes in what you changed here the next time it is opened. Nothing runs in the '
+        + 'background, so a change you make here waits for that. In Graphite, choose this vault in '
+        + 'Settings, Data and server, Data locations.')
+      .addDropdown((d) => d
+        .addOption('server', 'Server')
+        .addOption('device', 'This device')
+        .setValue(this.plugin.settings.source)
+        .onChange(async (v) => {
+          this.plugin.settings.source = v === 'device' ? 'device' : 'server';
+          await this.plugin.saveSettings();
+          await this.plugin.checkConnection(false);
+          this.display();
+        }));
+    if (onDevice) {
+      const look = this.plugin.mirrorLook;
+      new Setting(containerEl)
+        .setName('This device')
+        .setDesc(look
+          ? mirrorSentence(look, Date.now(), Platform.isMobile)
+          : 'Looking in this vault for the notes the Graphite app wrote.');
+    } else {
+      new Setting(containerEl)
+        .setName('Server URL')
+        // A space kept on devices, or shared through the relay, is on no
+        // server: choose This device above to read those.
+        .setDesc('The Graphite server your account is on, e.g. https://graphite.example.com. '
+          + 'Only spaces kept on a server can be pulled from it. To read spaces kept on your '
+          + 'devices, or shared between them through the relay, choose This device above.')
+        .addText((t) => t.setPlaceholder('https://graphite.example.com')
+          .setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
+          this.plugin.settings.serverUrl = v.trim();
+          await this.plugin.saveSettings();
+        }));
+      new Setting(containerEl)
+        .setName('API token')
+        .setDesc('Generate one in the Graphite app, signed in to that server: Settings → '
+          + 'Where am I signed in? → Generate API token.')
+        .addText((t) => t.setValue(this.plugin.settings.token).onChange(async (v) => {
+          this.plugin.settings.token = v.trim();
+          await this.plugin.saveSettings();
+        }));
+    }
     new Setting(containerEl)
       .setName('Connection')
-      .setDesc('Verifies the URL + token against the server and shows who you are signed in as.')
-      .addButton((b) => b.setButtonText('Test connection').setCta().onClick(async () => {
-        await this.plugin.checkConnection(true);
+      .setDesc(onDevice
+        ? 'Looks in this vault for the notes the Graphite app wrote, and says what changed here since.'
+        : 'Verifies the URL + token against the server and shows who you are signed in as.')
+      .addButton((b) => b.setButtonText(onDevice ? 'Look again' : 'Test connection').setCta().onClick(async () => {
+        // MEETING-CAPTURE: the space and inbox lists below were asked of the
+        // server when the tab drew, which on first setup was before there
+        // was a URL or a token, so they stayed empty until the tab was
+        // reopened. A test that connects draws them again; one that fails
+        // leaves the tab alone, with what was typed still in view.
+        if (await this.plugin.checkConnection(true) && !onDevice) this.display();
       }));
-    // R-379: the vault-shaping choice. Changing it does not touch what is
-    // already synced — pull a space again to move it to the new layout.
-    new Setting(containerEl)
-      .setName('Vault layout')
-      .setDesc('How a pulled space lands here. "Folder per space" writes an index note '
-        + 'plus one note per module, linked to each other and carrying the module\'s own '
-        + 'tags — so a module is a note you can open, link and embed on its own. '
-        + 'Existing files keep the layout they were pulled with until you pull them again.')
-      .addDropdown((d) => d
-        // R-1512: the default reads first. A dropdown whose first option
-        // is not what a fresh vault does is a dropdown that teaches the
-        // wrong answer to somebody who never opens it.
-        .addOption('folder', 'Folder per space (one note per module)')
-        .addOption('single', 'One file per space')
-        .setValue(this.plugin.settings.layout)
-        .onChange(async (v) => {
-          this.plugin.settings.layout = v === 'folder' ? 'folder' : 'single';
-          await this.plugin.saveSettings();
-          this.plugin.refreshPanel();
-        }));
+    // A pulled space's layout is the choice of a pull, which a device has none of.
+    if (!onDevice) {
+      // R-379: the vault-shaping choice. Changing it does not touch what is
+      // already synced — pull a space again to move it to the new layout.
+      new Setting(containerEl)
+        .setName('Vault layout')
+        .setDesc('How a pulled space lands here. "Folder per space" writes an index note '
+          + 'plus one note per module, linked to each other and carrying the module\'s own '
+          + 'tags — so a module is a note you can open, link and embed on its own. '
+          + 'Existing files keep the layout they were pulled with until you pull them again.')
+        .addDropdown((d) => d
+          // R-1512: the default reads first. A dropdown whose first option
+          // is not what a fresh vault does is a dropdown that teaches the
+          // wrong answer to somebody who never opens it.
+          .addOption('folder', 'Folder per space (one note per module)')
+          .addOption('single', 'One file per space')
+          .setValue(this.plugin.settings.layout)
+          .onChange(async (v) => {
+            this.plugin.settings.layout = v === 'folder' ? 'folder' : 'single';
+            await this.plugin.saveSettings();
+            this.plugin.refreshPanel();
+          }));
+    }
     new Setting(containerEl)
       .setName('Hide sync ids')
       .setDesc('Hide the "lp:" id markers the sync uses for matching records. '
@@ -3624,106 +4615,140 @@ class LpSettingTab extends PluginSettingTab {
         this.plugin.settings.hideIds = v;
         await this.plugin.saveSettings();
       }));
-    new Setting(containerEl)
-      .setName('Auto-push on save')
-      .setDesc('Push tracked files ~2.5s after you stop editing. Off = manual pushes only.')
-      .addToggle((t) => t.setValue(this.plugin.settings.autoPush).onChange(async (v) => {
-        this.plugin.settings.autoPush = v;
-        await this.plugin.saveSettings();
-        this.plugin.refreshPanel();
-      }));
-    // OC2: THE VAULT'S WALL. Omar, 2026-09-22: a vault is "linked to a space
-    // with its subtree"; 2026-09-23: a note naming a space outside it is
-    // refused, and says so. Unbound by default, and an unbound vault writes
-    // nothing — the server refuses it rather than letting it reach every
-    // space the account can.
-    //
-    // Both lists need the server, and a settings tab that waits for a
-    // server before it draws is a settings tab that cannot be opened
-    // offline. So they draw, and the choices arrive.
-    const binding = this.plugin.fetchBinding().catch(() => null);
-    new Setting(containerEl)
-      .setName('This vault\'s space')
-      .setDesc('Everything this vault writes to Graphite lands in this space or a space '
-        + 'nested inside it — or nowhere: a note that names a space outside it is refused, '
-        + 'and the refusal says which. Nothing is written until a space is chosen.')
-      .addDropdown((d) => {
-        d.addOption('', 'Not bound — this vault writes nothing');
-        d.setValue('');
-        d.onChange(async (v) => {
-          await this.plugin.bindVault(v || null);
-          this.display();
+    if (!onDevice) {
+      new Setting(containerEl)
+        .setName('Auto-push on save')
+        .setDesc('Push tracked files ~2.5s after you stop editing. Off = manual pushes only.')
+        .addToggle((t) => t.setValue(this.plugin.settings.autoPush).onChange(async (v) => {
+          this.plugin.settings.autoPush = v;
+          await this.plugin.saveSettings();
+          this.plugin.refreshPanel();
+        }));
+    }
+    if (onDevice) {
+      // These live on a server: a space the vault is bound to, an inbox, the
+      // lines a capture files, the census. The app on this device has no
+      // such server, so there is nothing to choose and one line says why.
+      new Setting(containerEl)
+        .setName('Capture, binding and census')
+        .setDesc('These need a Graphite server, so they are off while Graphite is read from this device. '
+          + 'Choose Server above to use them.');
+    } else {
+      // OC2: THE VAULT'S WALL. Omar, 2026-09-22: a vault is "linked to a space
+      // with its subtree"; 2026-09-23: a note naming a space outside it is
+      // refused, and says so. Unbound by default, and an unbound vault writes
+      // nothing — the server refuses it rather than letting it reach every
+      // space the account can.
+      //
+      // Both lists need the server, and a settings tab that waits for a
+      // server before it draws is a settings tab that cannot be opened
+      // offline. So they draw, and the choices arrive.
+      const binding = this.plugin.fetchBinding().catch(() => null);
+      new Setting(containerEl)
+        .setName('This vault\'s space')
+        .setDesc('Everything this vault writes to Graphite lands in this space or a space '
+          + 'nested inside it — or nowhere: a note that names a space outside it is refused, '
+          + 'and the refusal says which. Nothing is written until a space is chosen.')
+        .addDropdown((d) => {
+          d.addOption('', 'Not bound — this vault writes nothing');
+          d.setValue('');
+          d.onChange(async (v) => {
+            await this.plugin.bindVault(v || null);
+            this.display();
+          });
+          this.bindingChoices = Promise.all([binding, this.plugin.fetchSpaces()])
+            .then(([b, spaces]) => {
+              for (const s of spaces) d.addOption(s.id, s.name);
+              d.setValue(b?.bound && b.root ? b.root.id : '');
+            }).catch(() => { /* offline: the tab still opens */ });
         });
-        this.bindingChoices = Promise.all([binding, this.plugin.fetchSpaces()])
-          .then(([b, spaces]) => {
-            for (const s of spaces) d.addOption(s.id, s.name);
-            d.setValue(b?.bound && b.root ? b.root.id : '');
+      // R-1227: THE SETTING THE CAPTURE COMMAND ASKED FOR, AND THAT DID NOT
+      // EXIST. Off by default: a command that files tasks into somebody's
+      // workspace the first time it runs is not a command anybody asked for
+      // (RU-035). OC2 moved it onto the binding: the choices are the server's
+      // — Tasks modules inside this vault's space, in spaces you own — so the
+      // dropdown never offers what the server would then refuse.
+      new Setting(containerEl)
+        .setName('Capture inbox')
+        .setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds '
+          + 'in any note that is not a synced one. The line is marked afterwards, '
+          + 'so capturing again never makes it twice. Choose the space this vault is bound to first.')
+        .addDropdown((d) => {
+          d.addOption('', 'Off');
+          d.setValue('');
+          d.onChange(async (v) => {
+            if (!(await this.plugin.setInbox(v || null))) this.display();
+          });
+          this.inboxChoices = binding.then(async (b) => {
+            if (!b?.bound) return;
+            if (b.inbox) d.addOption(b.inbox.id, `${b.inbox.spaceName} › ${b.inbox.name}`);
+            for (const m of await this.plugin.fetchInboxChoices()) {
+              if (m.id !== b.inbox?.id) d.addOption(m.id, m.label);
+            }
+            d.setValue(b.inbox?.id ?? '');
           }).catch(() => { /* offline: the tab still opens */ });
-      });
-    // R-1227: THE SETTING THE CAPTURE COMMAND ASKED FOR, AND THAT DID NOT
-    // EXIST. Off by default: a command that files tasks into somebody's
-    // workspace the first time it runs is not a command anybody asked for
-    // (RU-035). OC2 moved it onto the binding: the choices are the server's
-    // — Tasks modules inside this vault's space, in spaces you own — so the
-    // dropdown never offers what the server would then refuse.
-    new Setting(containerEl)
-      .setName('Capture inbox')
-      .setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds '
-        + 'in any note that is not a synced one. The line is marked afterwards, '
-        + 'so capturing again never makes it twice. Choose the space this vault is bound to first.')
-      .addDropdown((d) => {
-        d.addOption('', 'Off');
-        d.setValue('');
-        d.onChange(async (v) => {
-          if (!(await this.plugin.setInbox(v || null))) this.display();
         });
-        this.inboxChoices = binding.then(async (b) => {
-          if (!b?.bound) return;
-          if (b.inbox) d.addOption(b.inbox.id, `${b.inbox.spaceName} › ${b.inbox.name}`);
-          for (const m of await this.plugin.fetchInboxChoices()) {
-            if (m.id !== b.inbox?.id) d.addOption(m.id, m.label);
-          }
-          d.setValue(b.inbox?.id ?? '');
-        }).catch(() => { /* offline: the tab still opens */ });
-      });
-    // RULED 2026-09-24: the two switches for tagged lines. Separate, as
-    // ruled — either one is enough for a tagged line to become a note.
-    new Setting(containerEl)
-      .setName('Capture any tagged line as a note')
-      .setDesc('A line that is not a task but has a #tag becomes a note in the '
-        + 'capture inbox\'s space (its first Notes module), marked so it is never '
-        + 'captured twice. Headings and lines of only tags are left alone.')
-      .addToggle((t) => t.setValue(this.plugin.settings.captureAnyTagged).onChange(async (v) => {
-        this.plugin.settings.captureAnyTagged = v;
-        await this.plugin.saveSettings();
-      }));
-    new Setting(containerEl)
-      .setName('Capture lines with these tags as notes')
-      .setDesc('Comma-separated, e.g. st, mtg. A tag takes everything beneath it: '
-        + 'st takes #st/IS-07. Works whether or not the switch above is on.')
-      .addText((t) => t.setPlaceholder('st, mtg').setValue(this.plugin.settings.captureTags)
-        .onChange(async (v) => {
-          this.plugin.settings.captureTags = v;
+      // RULED 2026-09-24: the two switches for tagged lines. Separate, as
+      // ruled — either one is enough for a tagged line to become a note.
+      new Setting(containerEl)
+        .setName('Capture any tagged line as a note')
+        .setDesc('A line that is not a task but has a #tag becomes a note in the '
+          + 'capture inbox\'s space (its first Notes module), marked so it is never '
+          + 'captured twice. Headings and lines of only tags are left alone.')
+        .addToggle((t) => t.setValue(this.plugin.settings.captureAnyTagged).onChange(async (v) => {
+          this.plugin.settings.captureAnyTagged = v;
           await this.plugin.saveSettings();
         }));
-    // OC7: the census. Says exactly what leaves, because the switch is the
-    // consent and a consent has to name what it covers.
-    const sent = this.plugin.censusState;
-    new Setting(containerEl)
-      .setName('Send a vault census to the morning sweep')
-      .setDesc('Off by default. When on, Graphite is sent — for each note with an '
-        + 'unticked to-do nobody filed, or dated in the last week — its path, its date, '
-        + 'how many task lines it holds in each state, its tags and its links. Never a '
-        + 'word of the note. The sweep uses it to find to-dos nobody filed and meetings '
-        + 'with no note; without it, the sweep says it could not look at the vault.'
-        + (sent === 'failed' ? ' The last census could not be sent.'
-          : sent === 'too-big' ? ' The last census was too large to send.'
-          : sent ? ` Last sent with ${sent.notes} note${sent.notes === 1 ? '' : 's'}.` : ''))
-      .addToggle((t) => t.setValue(this.plugin.settings.censusOn).onChange(async (v) => {
-        this.plugin.settings.censusOn = v;
-        await this.plugin.saveSettings();
-        if (v) await this.plugin.reportCensus({ loud: true });
-      }));
+      new Setting(containerEl)
+        .setName('Capture lines with these tags as notes')
+        .setDesc('Comma-separated, e.g. st, mtg. A tag takes everything beneath it: '
+          + 'st takes #st/IS-07. Works whether or not the switch above is on.')
+        .addText((t) => t.setPlaceholder('st, mtg').setValue(this.plugin.settings.captureTags)
+          .onChange(async (v) => {
+            this.plugin.settings.captureTags = v;
+            await this.plugin.saveSettings();
+          }));
+      // MEETING-CAPTURE: the command, run for you. Off by default (RU-035).
+      new Setting(containerEl)
+        .setName('Capture automatically')
+        .setDesc('Capture a note a minute after it stops changing, whether you wrote it '
+          + 'here or it arrived from another device, so nothing waits for the command. '
+          + 'A note open in the editor waits until you leave it. Needs the capture inbox above.')
+        .addToggle((t) => t.setValue(this.plugin.settings.autoCapture).onChange(async (v) => {
+          this.plugin.settings.autoCapture = v;
+          await this.plugin.saveSettings();
+        }));
+      new Setting(containerEl)
+        .setName('Folders whose notes become pages')
+        .setDesc('Comma-separated, e.g. Meetings. Every note in these folders is sent to '
+          + 'Graphite whole, a minute after it stops changing, and shown there as a page '
+          + 'with the tasks captured from it. Empty by default: nothing is sent. A note '
+          + 'with a routing heading (## Weekly >> Space) is a page whatever this says. '
+          + 'Needs the capture inbox above.')
+        .addText((t) => t.setPlaceholder('Meetings').setValue(this.plugin.settings.pageFolders)
+          .onChange(async (v) => {
+            this.plugin.settings.pageFolders = v;
+            await this.plugin.saveSettings();
+          }));
+      // OC7: the census. Says exactly what leaves, because the switch is the
+      // consent and a consent has to name what it covers.
+      const sent = this.plugin.censusState;
+      new Setting(containerEl)
+        .setName('Send a vault census to the morning sweep')
+        .setDesc('Off by default. When on, Graphite is sent — for each note with an '
+          + 'unticked to-do nobody filed, or dated in the last week — its path, its date, '
+          + 'how many task lines it holds in each state, its tags and its links. Never a '
+          + 'word of the note. The sweep uses it to find to-dos nobody filed and meetings '
+          + 'with no note; without it, the sweep says it could not look at the vault.'
+          + (sent === 'failed' ? ' The last census could not be sent.'
+            : sent === 'too-big' ? ' The last census was too large to send.'
+            : sent ? ` Last sent with ${sent.notes} note${sent.notes === 1 ? '' : 's'}.` : ''))
+        .addToggle((t) => t.setValue(this.plugin.settings.censusOn).onChange(async (v) => {
+          this.plugin.settings.censusOn = v;
+          await this.plugin.saveSettings();
+          if (v) await this.plugin.reportCensus({ loud: true });
+        }));
+    }
     // OC5: the agent contract. The description is the disclosure: it says
     // where note text goes, rather than implying that nothing leaves.
     const agent = this.plugin.agentState;
@@ -3741,6 +4766,27 @@ class LpSettingTab extends PluginSettingTab {
         this.plugin.settings.agentOn = v;
         await this.plugin.saveSettings();
         if (v) await this.plugin.publishAgentContract({ loud: true });
+      }));
+    new Setting(containerEl)
+      .setName('Show the Graphite bar')
+      .setDesc('A row of buttons above a note (below it on a phone or tablet): start a list, task, due, '
+        + 'assign, priority, tag, send to, capture now. It is not shown in a note Graphite syncs. Every '
+        + 'button is also a command, so you can put them on a phone toolbar and hide the row.')
+      .addToggle((t) => t.setValue(this.plugin.settings.barOn).onChange(async (v) => {
+        this.plugin.settings.barOn = v;
+        await this.plugin.saveSettings();
+        this.plugin.syncBars();
+      }));
+    new Setting(containerEl)
+      .setName('Share the picker lists with other devices')
+      .setDesc('On by default. While connected, the spaces, their Tasks and Notes modules, the people of '
+        + 'each space and the tags in use are written to Graphite/Toolbar lists.json in this vault, so a '
+        + 'tablet that has the plugin but no sign-in can still offer them in the bar pickers. Names only, '
+        + 'never a token, an address or a password.')
+      .addToggle((t) => t.setValue(this.plugin.settings.barShare).onChange(async (v) => {
+        this.plugin.settings.barShare = v;
+        await this.plugin.saveSettings();
+        if (v) await this.plugin.publishToolbarLists();
       }));
     new Setting(containerEl)
       .setName('Folders your agent may read')
@@ -3861,7 +4907,14 @@ class LpSettingTab extends PluginSettingTab {
   drawServers(el: HTMLElement) {
     el.empty();
     const list = this.plugin.serversOnThisMachine();
-    if (list.length === 0) {
+    if (this.plugin.onDevice) {
+      new Setting(el).setName('Graphite on this device')
+        .setDesc(this.plugin.lastCheck?.detail ?? 'Not looked at yet.')
+        .addButton((b) => b.setButtonText('Check').onClick(async () => {
+          await this.plugin.checkConnection(false);
+          this.drawServers(el);
+        }));
+    } else if (list.length === 0) {
       new Setting(el).setName('Servers').setDesc('No server is set for this vault yet — fill in the Server URL above.');
       return;
     }
@@ -3884,6 +4937,11 @@ class LpSettingTab extends PluginSettingTab {
   drawDevices(el: HTMLElement, phase: 'asking' | 'answered') {
     el.empty();
     const p = this.plugin;
+    if (p.onDevice) {
+      new Setting(el).setName('Devices')
+        .setDesc('The Graphite app on this device has no account to sign in to, so there are no sign-ins to list.');
+      return;
+    }
     if (!p.settings.serverUrl || !p.settings.token) {
       new Setting(el).setName('Devices').setDesc('Set the server URL and API token above to list the devices signed in to your account.');
       return;

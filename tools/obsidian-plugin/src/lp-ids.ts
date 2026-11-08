@@ -28,8 +28,28 @@
  *  R-1517: the list-line shape may end in a block anchor now — ` | lp: t1
  *  ^t1` — and the anchor is hidden WITH the marker. It is plumbing for a
  *  link, not something to read; Obsidian resolves `[[note#^t1]]` from the
- *  file, whatever the editor shows. */
-export const LP_ID_RE = /(?: ?\| ?lp: [A-Za-z0-9]+(?: \^[A-Za-z0-9-]+)?)|(?:<!-- lp: \S+ -->)/g;
+ *  file, whatever the editor shows.
+ *
+ *  R-062: `lp` is becoming `gr`, and a reader accepts both before any
+ *  writer changes. The `gr` forms are matched in exactly the positions the
+ *  `lp` forms are — after a pipe, inside a comment — never as a loose
+ *  `gr:` over prose (people write "500 gr: sifted"). The pipe form is
+ *  narrower still: it must END its line, which is where the real marker
+ *  sits (the server's LP_TAIL), so a field in the middle of somebody's line
+ *  is never taken for one. */
+export const LP_ID_RE = new RegExp(
+  '(?: ?\\| ?lp: [A-Za-z0-9]+(?: \\^[A-Za-z0-9-]+)?)'
+  + '|(?:<!-- lp: \\S+ -->)'
+  + '|(?: ?\\| ?gr: [A-Za-z0-9]+(?: \\^[A-Za-z0-9-]+)?(?=[ \\t]*(?:\\r?\\n|$)))'
+  + '|(?:<!-- gr: \\S+ -->)',
+  'g',
+);
+
+/** The freeform block's sentinels, in both spellings, `gr` first. This file
+ *  is the plugin's one place that knows the two; main.ts reads the block
+ *  with these. */
+export const FF_STARTS = ['<!-- gr-freeform:start -->', '<!-- lp-freeform:start -->'] as const;
+export const FF_ENDS = ['<!-- gr-freeform:end -->', '<!-- lp-freeform:end -->'] as const;
 
 export interface LpRange {
   from: number;
@@ -51,7 +71,16 @@ export function pipePositions(line: string): number[] {
   return out;
 }
 
-/** True when this line is a table header whose LAST column is `lp`.
+/** A table header cell that names the id column: `lp`, or `gr` (R-062).
+ *  Exact and lowercase, as `lp` always was — a column headed "Gr" or "grams"
+ *  is somebody's own and is never hidden. */
+export function isMarkerHeaderCell(cell: string): boolean {
+  const t = cell.trim();
+  return t === 'lp' || t === 'gr';
+}
+
+/** True when this line is a table header whose LAST column is `lp` (or
+ *  `gr`, R-062).
  *
  * Only the last: the importer destructures a row's cells by POSITION and
  * markdown.service's own comment says appending is the only shape an older
@@ -61,7 +90,7 @@ export function isLpHeader(line: string): boolean {
   const pipes = pipePositions(line);
   if (pipes.length < 2) return false;
   const last = line.slice(pipes[pipes.length - 2] + 1, pipes[pipes.length - 1]);
-  return last.trim() === 'lp';
+  return isMarkerHeaderCell(last);
 }
 
 export function isTableSeparator(line: string): boolean {
@@ -124,3 +153,4 @@ export function lpHiddenRanges(doc: string): LpRange[] {
   }
   return merged;
 }
+

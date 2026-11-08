@@ -1,41 +1,41 @@
-.lp-sync-view { padding: 8px 10px; }
-.lp-sync-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.lp-sync-head h4 { margin: 0; }
-.lp-sync-actions { display: flex; gap: 6px; }
-.lp-sync-section { margin-top: 14px; }
-.lp-sync-label {
+.gr-sync-view { padding: 8px 10px; }
+.gr-sync-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.gr-sync-head h4 { margin: 0; }
+.gr-sync-actions { display: flex; gap: 6px; }
+.gr-sync-section { margin-top: 14px; }
+.gr-sync-label {
   font-size: 10.5px; letter-spacing: 1px; color: var(--text-muted);
   border-bottom: 1px solid var(--background-modifier-border);
   padding-bottom: 3px; margin-bottom: 6px;
 }
-.lp-sync-dim { color: var(--text-muted); font-size: 12px; }
-.lp-sync-bad { color: var(--text-error); }
-.lp-sync-row {
+.gr-sync-dim { color: var(--text-muted); font-size: 12px; }
+.gr-sync-bad { color: var(--text-error); }
+.gr-sync-row {
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12.5px;
 }
-.lp-sync-row-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.lp-sync-state { font-size: 11px; }
-.lp-state-in-sync { color: var(--color-green, #4a7); }
-.lp-state-local-edits { color: var(--color-orange, #b82); }
-.lp-state-missing { color: var(--text-error); }
+.gr-sync-row-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.gr-sync-state { font-size: 11px; }
+.gr-state-in-sync { color: var(--color-green, #4a7); }
+.gr-state-local-edits { color: var(--color-orange, #b82); }
+.gr-state-missing { color: var(--text-error); }
 /* R-379: one line per note under the space it belongs to. The note name takes
    the space left over, so the state and its two buttons stay put however long
    the module name is. */
-.lp-sync-file {
+.gr-sync-file {
   display: flex; align-items: center; gap: 6px; margin-top: 4px;
   padding-left: 8px; border-left: 2px solid var(--background-modifier-border);
   font-size: 12px;
 }
-.lp-sync-file > span:first-child {
+.gr-sync-file > span:first-child {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.lp-sync-file button { font-size: 11px; padding: 1px 7px; }
-.lp-sync-row-btns { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
-.lp-sync-row-btns button { font-size: 11px; padding: 2px 8px; }
-.lp-sync-how { margin: 4px 0 0 18px; padding: 0; font-size: 12px; color: var(--text-muted); }
-.lp-sync-how li { margin: 3px 0; }
-.lp-picker-hint { color: var(--text-muted); font-size: 12px; }
+.gr-sync-file button { font-size: 11px; padding: 1px 7px; }
+.gr-sync-row-btns { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+.gr-sync-row-btns button { font-size: 11px; padding: 2px 8px; }
+.gr-sync-how { margin: 4px 0 0 18px; padding: 0; font-size: 12px; color: var(--text-muted); }
+.gr-sync-how li { margin: 3px 0; }
+.gr-picker-hint { color: var(--text-muted); font-size: 12px; }
 
 /* OC4 — ITALIC UNTIL APPROVED, and the state at a glance. Italic is drawn by
    the markdown itself; these say WHICH state an italic line is in, so a
@@ -64,7 +64,7 @@
 .theme-dark .cm-line.gr-proposal-approved::after { color: #7FB3B8; }
 /* Reading view: the key is stripped; the line keeps its italic and its wash. */
 li.gr-proposal { background: rgba(242, 184, 75, 0.14); box-shadow: inset 3px 0 0 #F2B84B; }
-.gr-proposal-row .lp-sync-state { text-transform: uppercase; letter-spacing: 0.05em; }
+.gr-proposal-row .gr-sync-state { text-transform: uppercase; letter-spacing: 0.05em; }
 .gr-proposal-row.gr-proposal-proposed > span:first-child { font-style: italic; }
 
 /* OC3 — the >> route list: the path dimmed above the leaf. */
@@ -88,3 +88,97 @@ li.gr-proposal { background: rgba(242, 184, 75, 0.14); box-shadow: inset 3px 0 0
 }
 .gr-links-row { font-size: 12.5px; padding: 2px 0; }
 .gr-links-binned { color: var(--text-faint); text-decoration: line-through; }
+
+/* THE GRAPHITE BAR — the pickers. Obsidian's own variables throughout, so the
+   bar and its pickers wear whatever theme the vault does. On a phone or tablet
+   a picker is a bottom sheet with 44px targets; on a desktop it is a popover
+   at the cursor. */
+.gr-sheet { padding: 8px; }
+.gr-sheet-pop.modal { position: absolute; width: 340px; max-width: calc(100vw - 16px); margin: 0; }
+.gr-sheet-pop.gr-due-modal { width: 520px; }
+.gr-pop-container .modal-bg { opacity: 0; }
+.gr-sheet-bottom.modal {
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: 100%; max-width: 100%;
+  margin: 0; border-radius: 14px 14px 0 0; max-height: 80vh; overflow-y: auto;
+}
+.gr-sheet-container { align-items: flex-end; }
+.gr-pick { display: flex; flex-direction: column; gap: 6px; }
+.gr-pick-title { font-size: 12px; color: var(--text-muted); padding: 4px 6px; }
+.gr-pick-filter, .gr-pick-words, .gr-time-other { width: 100%; }
+.gr-pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow-y: auto; }
+.gr-pick-group { font-size: 11px; color: var(--text-faint); padding: 8px 6px 2px; letter-spacing: 0.04em; }
+.gr-sheet .gr-pick-row {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; text-align: left;
+  background: transparent; box-shadow: none; border: 0; border-radius: 6px;
+  padding: 8px 10px; height: auto; color: var(--text-normal); font-size: 13px;
+}
+.gr-sheet .gr-pick-row:hover { background: var(--background-modifier-hover); }
+.gr-sheet .gr-pick-row.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
+.gr-sheet .gr-pick-row.is-disabled { opacity: 0.5; }
+.gr-pick-body { display: flex; flex-direction: column; min-width: 0; }
+.gr-pick-detail { font-size: 12px; color: var(--text-muted); white-space: normal; }
+.gr-pick-row.is-active .gr-pick-detail, .gr-pick-row.is-active .gr-pick-hint { color: inherit; opacity: 0.8; }
+.gr-pick-hint { font-size: 12px; color: var(--text-muted); }
+.gr-pick-right { margin-left: auto; }
+.gr-pick-avatar {
+  width: 22px; height: 22px; border-radius: 100px; flex: none; background: var(--background-modifier-border);
+  color: #101216; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.gr-pick-footer { display: flex; align-items: center; gap: 8px; padding: 8px 6px 2px; border-top: 1px solid var(--background-modifier-border); }
+.gr-pick-footer .gr-pick-words { width: 160px; }
+.gr-pick-writes, .gr-pick-writes-inline { font-size: 12px; color: var(--text-muted); padding: 4px 6px; }
+.gr-pick-writes-inline { color: var(--text-normal); font-size: 13px; padding: 0; }
+.gr-pick-set { margin-left: auto; }
+.gr-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.gr-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; height: auto;
+  padding: 6px 10px; font-size: 13px;
+}
+.gr-chip-sub { font-size: 11px; color: var(--text-muted); }
+.gr-chip.is-on, .gr-time.is-on, .gr-cal-day.is-on { background: var(--interactive-accent); color: var(--text-on-accent); }
+.gr-chip.is-on .gr-chip-sub { color: inherit; opacity: 0.8; }
+.gr-due-both { display: flex; gap: 16px; }
+.gr-cal { flex: 1; min-width: 0; }
+.gr-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.gr-cal-title { font-size: 12px; font-weight: 600; }
+.gr-cal-nav { background: transparent; box-shadow: none; padding: 2px 8px; height: auto; }
+.gr-cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; text-align: center; }
+.gr-cal-dow { font-size: 11px; color: var(--text-muted); }
+.gr-cal-day { background: transparent; box-shadow: none; padding: 5px 0; height: auto; font-size: 12px; }
+.gr-cal-day.is-today { outline: 1px solid var(--interactive-accent); }
+.gr-times { width: 150px; display: flex; flex-direction: column; gap: 6px; }
+.gr-time { height: auto; padding: 6px 10px; }
+/* Large targets on a phone or tablet (at least 44px). */
+.gr-mobile .gr-pick-row, .gr-mobile .gr-chip, .gr-mobile .gr-time, .gr-mobile .gr-cal-day,
+.gr-mobile .gr-cal-nav, .gr-mobile .gr-pick-set { min-height: 44px; min-width: 44px; font-size: 15px; }
+.gr-mobile .gr-pick-filter, .gr-mobile .gr-pick-words, .gr-mobile .gr-time-other { min-height: 44px; font-size: 16px; }
+.gr-mobile .gr-due-both { flex-direction: column; }
+.gr-mobile .gr-times { width: auto; flex-direction: row; flex-wrap: wrap; }
+
+/* ══ THE GRAPHITE BAR · THE ROW ═══════════════════════════════════════════
+ * Obsidian's own colours throughout, so the row looks like part of whatever
+ * theme the vault wears. Above a note on a desktop; below it on a phone or
+ * tablet, with targets of at least 44px. */
+.view-content:has(> .gr-bar) { display: flex; flex-direction: column; }
+.view-content:has(> .gr-bar) > :not(.gr-bar) { flex: 1 1 auto; min-height: 0; }
+.gr-bar {
+  display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap;
+  padding: 4px 8px; background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small);
+}
+.gr-bar-mobile { border-bottom: 0; border-top: 1px solid var(--background-modifier-border); padding: 6px 8px; gap: 6px; }
+.gr-bar-brand { font-size: 10px; letter-spacing: 0.08em; color: var(--text-faint); padding: 0 6px 0 2px; }
+.gr-bar .gr-bar-btn {
+  display: inline-flex; align-items: center; gap: 6px; height: auto; padding: 4px 10px;
+  background: transparent; box-shadow: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--text-normal); font-size: inherit; cursor: pointer;
+}
+.gr-bar .gr-bar-btn:hover { background: var(--background-modifier-hover); }
+.gr-bar-btn .gr-bar-icon { display: inline-flex; width: 16px; height: 16px; color: var(--text-muted); }
+.gr-bar-btn .gr-bar-icon svg { width: 16px; height: 16px; }
+.gr-bar .gr-bar-primary { background: var(--interactive-accent); color: var(--text-on-accent); }
+.gr-bar .gr-bar-primary:hover { background: var(--interactive-accent-hover); }
+.gr-bar-primary .gr-bar-icon { color: inherit; }
+.gr-bar-right { margin-left: auto; }
+.gr-bar.gr-bar-mobile .gr-bar-btn { min-height: 44px; min-width: 44px; justify-content: center; padding: 6px 12px; }

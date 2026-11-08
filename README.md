@@ -1,9 +1,30 @@
 # Graphite Sync
 
-Graphite Sync connects your Obsidian vaults to a **Graphite** server that you
-run yourself. Pull any of your Graphite spaces into a vault as Markdown, edit
-them like any other note, and push the changes back through a validate-first
-merge: a push either lands completely or changes nothing.
+Graphite Sync connects your Obsidian vaults to **Graphite** in one of two
+ways, chosen in the plugin settings under *Where Graphite is*:
+
+- **Server** — for anyone whose spaces are kept on a Graphite server: one you
+  run yourself, or an account on a server run for you. Pull any of those spaces
+  into a vault as Markdown, edit them like any other note, and push the changes
+  back through a validate-first merge: a push either lands completely or
+  changes nothing.
+- **This device** — for spaces kept in the Graphite app on the same device, or
+  shared between devices through the relay, which are on no server. The app
+  writes those spaces into your vault as notes and takes in what you changed
+  there; the plugin shows you where that stands. No server and no account.
+
+**How This device works.** The plugin never connects to anything in this mode.
+In the Graphite app, *Settings → Data & server → Data locations*, choose your
+vault. Whenever the app is opened it writes your spaces into the vault as notes,
+and takes in what you changed there while it was closed: a record's text, a
+tick, a new task line. In Obsidian the plugin looks for what the app wrote and
+tells you when it last wrote and which notes you have changed since. Nothing
+runs in the background, so a change you make in Obsidian reaches Graphite the
+next time you open the Graphite app, and the plugin does not call it synced
+before then. Pull, push, capture and the other features that need a server are
+not available in this mode, and say so. It works on a computer; on a phone the
+plugin can read a vault that a computer keeps, but the Graphite app on a phone
+does not write into an Obsidian vault yet.
 
 ## Features
 
@@ -64,9 +85,17 @@ merge: a push either lands completely or changes nothing.
   data and is kept across pulls and pushes. In the folder layout each module
   note has its own block, so prose sits next to the records it is about.
 - **Native tags** — record tags arrive as `#slug` tokens, so Obsidian's
-  tag pane reads your Graphite data natively. A module note's own tags are
-  its `tags` property: change them in the Properties panel and they reach
-  the app on the next push.
+  tag pane reads your Graphite data natively, and a `#tag` you type on a
+  record's line reaches the record on the next push. That holds for
+  comments and votes as well as tasks and the rest: a comment's line and a vote's heading
+  carry the record's id (hidden by this plugin, like the other ids), and a
+  tag typed there lands on that comment or that vote. Only the tag is read
+  from those two: who wrote a comment and when, and a vote's options,
+  counts and decision, belong to Graphite and a change to them in the note
+  is not applied. A tag on a vote's option line is not read either, since an
+  option is not a record — put it on the question. A module note's own tags
+  are its `tags` property: change them in the Properties panel and they
+  reach the app on the next push.
 - **Records you can link to** — task, reminder, checklist and recipe lines
   carry a block anchor, so any note can link to one
   (`[[Projects/Tasks — Backlog#^…]]`). The index note's **Links** table shows
@@ -124,6 +153,21 @@ merge: a push either lands completely or changes nothing.
   cursor decides the scope: a line, a heading's section, or the whole note
   from its properties. *Make these tasks* turns the selected bullets into
   checkboxes.
+- **The Graphite bar** — a row of buttons above any note that is not a synced Graphite file (below it on a phone or tablet, with targets of at least 44px): Start a list, Task, Due, Assign, Priority, Tag, Send to and Capture now. It wears Obsidian's own colours, each button is also a command (*Graphite bar: Capture now* captures the note you are in; on a device with no sign-in it says your PC does that once the sync brings the note over), and *Show the Graphite bar* in the settings hides the row.
+- **Pickers on a tablet with no sign-in** — while the plugin is connected (a PC), it writes the spaces, their Tasks and Notes modules, the people of each space and the tags in use to `Graphite/Toolbar lists.json` in the vault, only when they changed. A tablet that has the plugin but no token reads that file, brought over by your vault sync, and every picker works there; capture stays the PC's job. The file holds names only, never a token, a server address or a password. *Share the picker lists with other devices* in the settings turns it off, and *Publish the picker lists for devices with no sign-in* writes it now.
+- **Start a list** — *Graphite bar: Start a list* asks what you are writing (a task list or notes; calendar events and the rest are shown as later), then where it goes: the note's own space is offered first, else the capture inbox, then every Tasks or Notes module in the vault's space. The heading words are editable (Actions to start with) and kept. It inserts `## Actions >> Space / Module` and a first box with the cursor on it, over a blank line or below the current one.
+- **The Graphite bar's pickers** — each is a command, so a phone or tablet
+  can put it on Obsidian's own mobile toolbar. *Graphite bar: Task* makes
+  the line an open task (or starts the next one below). *Graphite bar: Due*
+  offers day chips counted from the note's own date, a month calendar and
+  times, and always writes `| due: YYYY-MM-DD` with an optional `HH:MM`.
+  *Graphite bar: Assign* offers the people of the space the line is going
+  to and writes `| assigned:` with the exact name. *Graphite bar: Priority*
+  writes `| priority:` low, normal, high or critical. *Graphite bar: Tag*
+  appends a tag already in use, or a new one, to the line's words.
+  *Graphite bar: Send to* is the `>>` list. They write onto the line as
+  text and change nothing in Graphite until the line is captured; they
+  decline a line that is already captured, and a synced Graphite file.
 - **Proposals you approve** — a line written in italics with a proposal
   marker is a suggestion, not yet yours: it is shown washed and labelled
   until you approve it, and nothing is created in Graphite before then.
@@ -150,10 +194,15 @@ merge: a push either lands completely or changes nothing.
 
 ## Requirements
 
-- A running Graphite server you control.
+- An account on a **Graphite server**, whether you run it yourself (for
+  example `https://graphite.example.com`) or it is run for you. The spaces you
+  want in the vault must be kept on that server. Spaces kept only on your
+  devices, or shared between them through the relay, are not reachable (see
+  the top of this page).
 - An **API token**: in the app go to *Settings → Where am I signed in? →
   Generate API token*, and paste it into the plugin settings together with
   your server URL. Tokens are listed and revocable in the app at any time.
+  An app used only on a device, with no server account, offers no API token.
 
 ## Quick start
 
@@ -186,8 +235,10 @@ What the community-plugin policies ask a plugin to say about itself.
 
 - **An account and a server are required.** The plugin is a client for a
   Graphite server and does nothing without one: you need an account on a
-  server you control and an API token from it (see *Requirements*). The
-  plugin itself is free to install and use, and shows no ads.
+  server, one you run or one run for you, and an API token from it (see
+  *Requirements*). It reaches only spaces that server holds, not spaces kept
+  on a device or shared through the relay. The plugin itself is free to
+  install and use, and shows no ads.
 - **Network use.** The plugin talks only to servers whose address you type
   into its settings: your **Graphite server**, for every pull, push, check,
   capture, link and the connection test; and, only if you switch on *Note
@@ -195,7 +246,7 @@ What the community-plugin policies ask a plugin to say about itself.
   and no third-party service. The settings screen can also ask each Graphite
   server your other vaults use whether it is up (`/health`, no token sent).
 - **No telemetry.** Nothing about your use of the plugin is collected or sent
-  anywhere but your own servers. The optional *vault census* sends counts and
+  anywhere but the servers you enter in the settings. The optional *vault census* sends counts and
   dates only, never the words of a line, and only to your Graphite server.
 - **Files outside your vault (desktop only).** Obsidian keeps a list of your
   vaults in its own application-data folder. The plugin reads that list to

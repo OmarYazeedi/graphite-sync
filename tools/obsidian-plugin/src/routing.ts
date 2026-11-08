@@ -201,15 +201,23 @@ export function sectionFor(lines: readonly string[], line: number): string | und
   return heading;
 }
 
-/** The note's `lp_space:`, if the frontmatter names one. */
+/** The note's `lp_space:`, if the frontmatter names one.
+ *
+ *  R-062: `gr_space:` is read the same way, and wins if a note carries both
+ *  (a note the next release wrote, then edited from an old copy). What is
+ *  WRITTEN stays `lp_space:` until the writers change (frontmatterFor). */
 export function noteSpace(lines: readonly string[]): string | undefined {
   const fm = frontmatterRange(lines);
   if (!fm) return undefined;
+  let found: string | undefined;
   for (let i = fm[0] + 1; i < fm[1]; i++) {
-    const m = /^lp_space:\s*(.+?)\s*$/.exec(lines[i]);
-    if (m) return m[1].replace(/^["']|["']$/g, '');
+    const m = /^(gr|lp)_space:\s*(.+?)\s*$/.exec(lines[i]);
+    if (!m) continue;
+    const v = m[2].replace(/^["']|["']$/g, '');
+    if (m[1] === 'gr') return v;
+    if (found === undefined) found = v;
   }
-  return undefined;
+  return found;
 }
 
 /* ══ RULED 2026-09-24 — "MAKE THESE TASKS" ═══════════════════════════════

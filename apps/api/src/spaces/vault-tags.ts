@@ -99,6 +99,24 @@ export function parseVaultTags(text: string): { text: string; tags: string[] } {
 }
 
 /**
+ * A record's OWN WORDS, written so the vault will not read a hash-word in
+ * them as a tag (row 1513, comments and votes).
+ *
+ * A comment's body and a vote's question are free text, and a person who
+ * wrote "ask about #boiler" meant words, not a filing. Printed bare, the
+ * next push would read `#boiler` out of the line and place it as a tag on
+ * the record, which is a tag nobody put there. A backslash before the hash is how Obsidian
+ * spells a literal hash, the reader's pattern does not match it (the hash
+ * is not at the start or after a space), and the importer never writes the
+ * words back, so the escape never reaches Postgres. A token that is not a
+ * tag (`#12`) is left exactly as it was.
+ */
+export function escapeTagLike(text: string): string {
+  return text.replace(VAULT_TAG, (all, pre: string, slug: string) =>
+    isTagToken(slug) ? pre + '\\#' + slug : all);
+}
+
+/**
  * Can this stored tag name be written as a bare `#tag` and read back as
  * itself?
  *

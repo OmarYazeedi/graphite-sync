@@ -179,7 +179,7 @@ export function agentBriefNote(folders: readonly string[]): string {
     where,
     '',
     '- **Never** a note tagged `#private`, or whose frontmatter says `graphite: false`.',
-    '- **Never** a note whose frontmatter has `lp_type:` — Graphite rewrites those.',
+    '- **Never** a note whose frontmatter has `lp_type:` or `gr_type:` — Graphite rewrites those.',
     '- Never the two files in `Graphite/` except to read them.',
     '',
     '## Two behaviours, read section by section',

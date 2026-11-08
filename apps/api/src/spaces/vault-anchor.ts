@@ -64,8 +64,12 @@ export function blockAnchor(id: string): string {
 }
 
 /** The ` | lp: <id>` marker at the end of a line, and the anchor after it if
- *  there is one. Group 1 is the id. */
-export const LP_TAIL = /\s*\|\s*lp:\s*([A-Za-z0-9]+)(?:\s+\^[A-Za-z0-9-]+)?\s*$/;
+ *  there is one. Group 1 is the id.
+ *
+ *  `gr` is read in the same slot, here and in the three below: the markers
+ *  are being renamed, and every reader accepts both spellings before any
+ *  writer changes (file-markers.ts says why). */
+export const LP_TAIL = /\s*\|\s*(?:gr|lp):\s*([A-Za-z0-9]+)(?:\s+\^[A-Za-z0-9-]+)?\s*$/;
 
 /** The same marker as one pipe-separated part of a line (`lp: t1 ^t1`), which
  *  is how the importer's line parsers see it. Group 1 is the id.
@@ -75,7 +79,7 @@ export const LP_TAIL = /\s*\|\s*lp:\s*([A-Za-z0-9]+)(?:\s+\^[A-Za-z0-9-]+)?\s*$/
  *  like a line whose record had been deleted, and both doors CREATE a record
  *  for one of those. That is the one failure the proposal loop exists to
  *  rule out — something becoming real without his approval. */
-export const LP_PART = /^lp:\s*(?!p_)([^\s^]+)(?:\s+\^[A-Za-z0-9-]+)?$/;
+export const LP_PART = /^(?:gr|lp):\s*(?!p_)([^\s^]+)(?:\s+\^[A-Za-z0-9-]+)?$/;
 
 /* ══ OC4 — ITALIC UNTIL APPROVED: A PROPOSAL'S MARKER ═════════════════════
  *
@@ -103,10 +107,10 @@ export const LP_PART = /^lp:\s*(?!p_)([^\s^]+)(?:\s+\^[A-Za-z0-9-]+)?$/;
 export const PROPOSAL_KEY = /^p_[A-Za-z0-9]{4,24}$/;
 
 /** The proposal marker at the end of a line. Group 1 is the key. */
-export const PROPOSAL_TAIL = /\s*\|\s*lp:\s*(p_[A-Za-z0-9]{4,24})\s*$/;
+export const PROPOSAL_TAIL = /\s*\|\s*(?:gr|lp):\s*(p_[A-Za-z0-9]{4,24})\s*$/;
 
 /** The proposal marker as one pipe-separated part. Group 1 is the key. */
-export const PROPOSAL_PART = /^lp:\s*(p_[A-Za-z0-9]{4,24})$/;
+export const PROPOSAL_PART = /^(?:gr|lp):\s*(p_[A-Za-z0-9]{4,24})$/;
 
 /* ══ OC3 — THE ROUTING TOKEN: `>>` ═════════════════════════════════════════
  *

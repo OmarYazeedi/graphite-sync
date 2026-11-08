@@ -54,8 +54,9 @@ const FRONTMATTER_DATE = /^date:\s*["']?(\d{4}-\d{2}-\d{2})/m;
 const NAMED_DAY = /(\d{4}-\d{2}-\d{2})/;
 
 /** The note's day: a `date:` it declares, else a day in its name (a daily
- *  note), else the day the file was made. */
-function noteDay(path: string, text: string, createdMs: number): string {
+ *  note), else the day the file was made. Capture sends it too, as the day
+ *  `due: friday` counts from. */
+export function noteDay(path: string, text: string, createdMs: number): string {
   const head = text.startsWith('---') ? text.slice(0, text.indexOf('\n---', 3) + 1) : '';
   const declared = FRONTMATTER_DATE.exec(head);
   if (declared) return declared[1];
