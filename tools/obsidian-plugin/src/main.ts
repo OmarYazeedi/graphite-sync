@@ -278,7 +278,23 @@ export function serverCheckText(c: ServerCheck | null | undefined): string {
     : `Checked at ${clock(c.at)}: ${c.detail}.`;
 }
 
-interface SpaceInfo { id: string; name: string; }
+/** Why a pull failed, in words. A 403 from the export routes is the server
+ *  saying this vault does not mirror that space (0.6.11): said as that, with
+ *  what to do, not as a bare status. */
+function pullFailedWords(e: any): string {
+  if (e?.status === 403) {
+    return "this vault does not mirror that space. Switch it on under Spaces to mirror in the plugin "
+      + "settings (a space shared with you also needs its owner's approval).";
+  }
+  return String(e);
+}
+
+interface SpaceInfo { id: string; name: string; /** false for a space shared with the account (GET /spaces says `shared`). */ owned?: boolean; }
+
+/** What the server says about one space for this vault (GET /mirror/vault/:id/spaces).
+ *  `on` means mirrored now: chosen and, when the space is not the person's own,
+ *  approved. A space with no row is off. */
+interface MirrorChoice { spaceId: string; state: 'on' | 'waiting' | 'refused' | 'withdrawn'; owned: boolean; ownerName: string | null; }
 interface ModuleInfo { id: string; name: string; type: string; }
 interface VaultDest { name: string; path: string; current: boolean; }
 
@@ -329,21 +345,15 @@ interface LpSettings {
   token: string;
   /** vault file path -> synced space. */
   files: Record<string, FileEntry>;
-  /** 0.6.1 · LINKING IS ENOUGH (Omar, 2026-11-17: "once the graphite plugin is
-   *  installed in obsidian and linked with a key, it should be as simple as
-   *  mirror"). On: every space the key can read that this vault has not been
-   *  offered yet is pulled in when the connection is checked - the first link
-   *  brings them all, and a space made later arrives the next time Obsidian
-   *  opens. It only WRITES FILES INTO THIS VAULT; nothing leaves the machine,
-   *  and pushing edits back stays the separate auto-push switch (RU-035). A
-   *  vault that already chose its spaces by hand, before this existed, keeps
-   *  it off until the person turns it on. */
-  mirrorAll: boolean;
-  /** The ids of the spaces this vault has been offered, so one the person
-   *  stopped syncing (or whose pull failed) is not brought back or retried at
-   *  every check. "Bring in every space" on the command is the explicit ask
-   *  and ignores it. */
-  spacesSeen: string[];
+  /** 0.6.11 · WHICH SPACES THIS VAULT MIRRORS (Omar, 2026-11-18: "for obsidian
+   *  sync dont use all spaces as on by default. in fact it should be off and if
+   *  the user is not the owner, the owner must approve it"). The choices are
+   *  the SERVER's (it refuses every other space), so there is no list here -
+   *  only whether the spaces this vault already had before 0.6.11 were
+   *  recorded as choices once, so an upgrade does not cut off notes that were
+   *  syncing. Only the spaces the person OWNS are recorded for them; a space
+   *  shared with them is theirs to ask its owner for. */
+  mirrorAdopted: boolean;
   /** ROW 2514 (R-2841): THE TEXT EACH SYNCED NOTE HAD WHEN THE SERVER LAST
    *  WROTE IT — what a pull put in the file, or the canonical text a push
    *  wrote back. Sent as `base` on the next push so the server can tell a
@@ -483,7 +493,7 @@ interface LpSettings {
  * A default is an answer to "what did you build this for". This one said
  * "an archive", and he asked for a vault twice. */
 const DEFAULTS: LpSettings = {
-  source: 'server', serverUrl: '', token: '', files: {}, mirrorAll: true, spacesSeen: [], bases: {}, autoPush: false, hideIds: true,
+  source: 'server', serverUrl: '', token: '', files: {}, mirrorAdopted: false, bases: {}, autoPush: false, hideIds: true,
   layout: 'folder', vaultId: '',
   captureAnyTagged: false, captureTags: '', autoCapture: false, pageFolders: '', pagesOn: false, pageModules: {}, pagesSent: {}, ticks: {}, censusOn: false,
   agentOn: false, agentFolders: '', routingList: null,
@@ -1044,7 +1054,7 @@ export default class GraphitePlugin extends Plugin {
     });
 
     this.addCommand({ id: 'lp-open-panel', name: 'Open the sync panel', callback: () => this.openPanel() });
-    this.addCommand({ id: 'lp-pull-all', name: 'Bring in every space', callback: () => void this.mirrorEverySpace(true) });
+    this.addCommand({ id: 'lp-pull-all', name: 'Bring in the spaces I mirror', callback: () => void this.mirrorChosenSpaces(true) });
     this.addCommand({ id: 'lp-pull-space', name: 'Pull a space (pick destination vault)', callback: () => this.chooseAndPull() });
     this.addCommand({ id: 'lp-pull-selective', name: 'Pull a space into THIS vault, choosing modules', callback: () => this.chooseAndPullSelective() });
     this.addCommand({ id: 'lp-push-file', name: 'Push the current file back to Graphite', callback: () => this.pushCurrent() });
@@ -1902,10 +1912,16 @@ export default class GraphitePlugin extends Plugin {
       // OC5 refreshes the routes itself, so it is either/or, not both.
       if (this.settings.agentOn) void this.publishAgentContract();
       else void this.refreshRoutes();
-      // Linking is enough: whatever space the key can read and this vault has
-      // not been offered comes in now.
+      // The spaces this vault mirrors (chosen, and approved when they are not
+      // the person's own) that have no file here yet come in now. Nothing else
+      // does: a vault mirrors NO space until one is chosen.
       window.clearTimeout(this.mirrorTimer);
-      this.mirrorTimer = window.setTimeout(() => void this.mirrorEverySpace(false), this.firstMirrorDelayMs);
+      this.mirrorTimer = window.setTimeout(() => {
+        // Cleared as it fires, so "a bring-in is waiting" and "a bring-in is
+        // running" (`mirroring`) are together the whole of "not idle".
+        this.mirrorTimer = 0;
+        void this.mirrorChosenSpaces(false);
+      }, this.firstMirrorDelayMs);
       return true;
     } catch (e: any) {
       this.lastMe = null;
@@ -3576,6 +3592,164 @@ export default class GraphitePlugin extends Plugin {
     return true;
   }
 
+  /* ══ 0.6.11 · WHICH SPACES THIS VAULT MIRRORS ═══════════════════════════
+   *
+   * Omar, 2026-11-18: "for obsidian sync dont use all spaces as on by
+   * default. in fact it should be off and if the user is not the owner, the
+   * owner must approve it." Undoing 0.6.1's "every space the key can read".
+   *
+   * A vault mirrors NO space until its person chooses one here. Choosing a
+   * space they OWN mirrors it at once; choosing one SHARED with them sends a
+   * request to its owner (a notification in Graphite, never a popup there) and
+   * mirrors nothing until the owner approves. The owner can withdraw their
+   * approval later, which stops the mirror.
+   *
+   * The SERVER holds the choices and enforces them: its pull and push routes
+   * refuse every other space for this vault. The plugin only asks and shows
+   * the answer, because a rule the plugin enforced would be a rule around the
+   * plugin, and the vault is edited by hand (same reason as the binding). */
+  mirrorChoices = new Map<string, MirrorChoice>();
+  /** Spaces whose pull failed in this session: a quiet check does not retry
+   *  them at every connection check; the command and the settings button do. */
+  private pullFailedThisSession = new Set<string>();
+
+  /** The vault's choices as the server holds them, or null when they could
+   *  not be read (offline, an older server). */
+  async fetchMirrorChoices(): Promise<Map<string, MirrorChoice> | null> {
+    if (this.offServer) return null;
+    try {
+      const res = await requestUrl({ url: this.vaultUrl("/spaces"), headers: this.headers, throw: false });
+      if (res.status >= 400) return null;
+      const next = new Map<string, MirrorChoice>();
+      for (const s of ((res.json?.spaces ?? []) as MirrorChoice[])) next.set(s.spaceId, s);
+      this.mirrorChoices = next;
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Words for one space's state, for the settings tab and the notices. */
+  mirrorStateLine(c: MirrorChoice | undefined): string {
+    const who = c?.ownerName ? c.ownerName : "its owner";
+    switch (c?.state) {
+      case "on": return c.owned ? "Mirrored." : `Mirrored - ${who} approved it.`;
+      case "waiting": return `Waiting for ${who}'s approval. Nothing is mirrored until they approve.`;
+      case "refused": return `Not approved by ${who}. Switch it on to ask again.`;
+      case "withdrawn": return `${who} withdrew their approval. Switch it on to ask again.`;
+      default: return "Off.";
+    }
+  }
+
+  /** Choose a space for this vault. Own space: mirrored at once (and pulled,
+   *  unless `pull` is false). Anyone else's: the owner is asked, and the answer
+   *  is said. Answers the choice the server now holds, or null when it
+   *  refused or could not be reached. */
+  async chooseSpace(sp: SpaceInfo, pull = true): Promise<MirrorChoice | null> {
+    if (this.needsServer("Choosing the spaces to mirror")) return null;
+    let res;
+    try {
+      res = await requestUrl({
+        url: this.vaultUrl(`/spaces/${encodeURIComponent(sp.id)}`), method: "PUT",
+        contentType: "application/json",
+        body: JSON.stringify({ label: this.app.vault.getName() }),
+        headers: this.headers, throw: false,
+      });
+    } catch (e) {
+      new Notice(`Graphite: could not reach the server to choose "${sp.name}" - ${e}`);
+      return null;
+    }
+    if (res.status >= 400) {
+      new Notice(`Graphite: "${sp.name}" was not chosen - `
+        + `${res.json?.message ?? `the server refused it (${res.status})`}.`, 12000);
+      return null;
+    }
+    const got = res.json as MirrorChoice;
+    const choice: MirrorChoice = {
+      spaceId: sp.id, state: got.state, owned: !!got.owned, ownerName: got.ownerName ?? null,
+    };
+    this.mirrorChoices.set(sp.id, choice);
+    if (choice.state === "on") {
+      this.pullFailedThisSession.delete(sp.id);
+      if (pull) await this.pullSpace(sp);
+    } else if (choice.state === "waiting") {
+      new Notice(`Graphite: asked ${choice.ownerName ?? "the owner"} to approve mirroring "${sp.name}". `
+        + "Nothing is mirrored until they do.", 12000);
+    }
+    return choice;
+  }
+
+  /** Stop mirroring a space for this vault, or drop a request. The notes
+   *  already here stay as ordinary files (forgetting is a mapping change). */
+  async unchooseSpace(sp: SpaceInfo): Promise<boolean> {
+    if (this.needsServer("Switching a space off")) return false;
+    let res;
+    try {
+      res = await requestUrl({
+        url: this.vaultUrl(`/spaces/${encodeURIComponent(sp.id)}`), method: "DELETE",
+        headers: this.headers, throw: false,
+      });
+    } catch (e) {
+      new Notice(`Graphite: could not reach the server to switch "${sp.name}" off - ${e}`);
+      return false;
+    }
+    if (res.status >= 400) {
+      new Notice(`Graphite: "${sp.name}" was not switched off - `
+        + `${res.json?.message ?? `the server refused it (${res.status})`}.`, 12000);
+      return false;
+    }
+    this.mirrorChoices.delete(sp.id);
+    await this.forgetSpace(sp.id);
+    return true;
+  }
+
+  /** A space picked by hand (the pull commands): it must be one this vault
+   *  mirrors. Not yet chosen means choosing it now, which is the same
+   *  decision the settings toggle makes - an owned space is mirrored, a shared
+   *  one is asked of its owner and the pull waits. */
+  async mirrorOrAsk(sp: SpaceInfo): Promise<boolean> {
+    const known = (await this.fetchMirrorChoices())?.get(sp.id) ?? this.mirrorChoices.get(sp.id);
+    if (known?.state === "on") return true;
+    const c = await this.chooseSpace(sp, false);
+    return c?.state === "on";
+  }
+
+  /** 0.6.11 · AN UPGRADE KEEPS WHAT WAS SYNCING. Before this version a vault
+   *  mirrored every space the key could read, so the server holds no choices
+   *  for a vault that was already syncing. Once, the spaces this vault already
+   *  tracks that the person OWNS are recorded as their choices; a space shared
+   *  with them is not - it is the owner's to approve - and they are told which.
+   *  Answers false when the server could not be reached, so it is tried again. */
+  private async adoptTrackedSpaces(spaces: SpaceInfo[]): Promise<void> {
+    if (this.settings.mirrorAdopted) return;
+    const tracked = new Set(Object.values(this.settings.files).map((e) => e.spaceId));
+    const shared: string[] = [];
+    let reached = true;
+    for (const sp of spaces) {
+      if (!tracked.has(sp.id)) continue;
+      if (sp.owned === false) { shared.push(sp.name); continue; }
+      try {
+        const res = await requestUrl({
+          url: this.vaultUrl(`/spaces/${encodeURIComponent(sp.id)}`), method: "PUT",
+          contentType: "application/json",
+          body: JSON.stringify({ label: this.app.vault.getName() }),
+          headers: this.headers, throw: false,
+        });
+        if (res.status >= 500) reached = false;
+      } catch {
+        reached = false;
+      }
+    }
+    if (!reached) return;
+    this.settings.mirrorAdopted = true;
+    await this.saveSettings();
+    if (shared.length) {
+      new Notice(`Graphite: ${shared.join(", ")} ${shared.length === 1 ? "is" : "are"} shared with you, so `
+        + "mirroring it needs its owner to approve. Choose it under Spaces to mirror in the plugin "
+        + "settings to ask; until then its notes here stay as they are and are not synced.", 15000);
+    }
+  }
+
   /** Set while a whole-account pull runs: each space's own "pulled" line gives
    *  way to the one summary, so ten spaces are one notice and not ten. Notes
    *  that were banked or let go still say so. */
@@ -3584,33 +3758,28 @@ export default class GraphitePlugin extends Plugin {
   /** 0.6.9: how long after the layout is ready the first connection check
    *  runs; a test sets it to nothing. */
   startupDelayMs = 800;
-  /** 0.6.9: how long the automatic bring-in of every space waits after the
-   *  connection check that found it owed, and the rest it takes between one
-   *  space and the next. Both are there so Obsidian finishes opening, and
-   *  then indexes one space's notes before the next arrive. */
+  /** 0.6.9: how long the automatic bring-in waits after the connection check
+   *  that found it owed, and the rest it takes between one space and the next.
+   *  Both are there so Obsidian finishes opening, and then indexes one space's
+   *  notes before the next arrive. */
   firstMirrorDelayMs = 3000;
   spaceGapMs = 250;
   private mirrorTimer = 0;
 
-  /** 0.6.1 · LINKING IS ENOUGH. Pulls every space the key can read - the ones
-   *  the person owns and the ones shared with them, which is what
-   *  `GET /spaces` lists - into this vault, in the vault's layout.
+  /** Pulls the spaces this vault MIRRORS that have no file here yet - chosen,
+   *  and approved when they are not the person's own. That is all it does: it
+   *  never offers a space nobody chose.
    *
-   *  `loud` is the person asking (the command, the settings button): it brings
-   *  in every space with no file here, offered before or not. Quiet is the
-   *  check that runs when Obsidian opens and when a key is tested: it brings
-   *  in the spaces this vault has not been offered, and only while
-   *  `mirrorAll` is on. A space is marked offered however its pull went, so a
-   *  refusal is said once and not retried at every check; the command is how
-   *  it is tried again.
+   *  `loud` is the person asking (the command, the settings button): it tries
+   *  a failed space again and says when there is nothing to do. Quiet is the
+   *  check that runs when Obsidian opens and when a key is tested; a space that
+   *  failed this session is not retried by it, so a refusal is said once.
    *
    *  The server's per-space "kept as .md files on the server" switch is a
    *  different thing (the server writing a folder of its own) and is neither
-   *  read nor changed here: export.md and export.folder answer for any space
-   *  the key can read. */
-  async mirrorEverySpace(loud: boolean): Promise<number> {
+   *  read nor changed here. */
+  async mirrorChosenSpaces(loud: boolean): Promise<number> {
     if (this.offServer || !this.configured) return 0;
-    if (!loud && !this.settings.mirrorAll) return 0;
     // One run at a time. A check that fired the quiet run a moment ago is
     // finished before the person's own ask goes on; a second quiet one is
     // simply not needed.
@@ -3627,9 +3796,15 @@ export default class GraphitePlugin extends Plugin {
         if (loud) new Notice(`Graphite: could not list your spaces - ${e}`);
         return 0;
       }
-      const seen = new Set(this.settings.spacesSeen);
-      const todo = spaces.filter((sp) =>
-        this.entriesForSpace(sp.id).length === 0 && (loud || !seen.has(sp.id)));
+      await this.adoptTrackedSpaces(spaces);
+      const choices = await this.fetchMirrorChoices();
+      if (!choices) {
+        if (loud) new Notice("Graphite: could not read which spaces this vault mirrors.");
+        return 0;
+      }
+      const mirrored = spaces.filter((sp) => choices.get(sp.id)?.state === "on");
+      const todo = mirrored.filter((sp) =>
+        this.entriesForSpace(sp.id).length === 0 && (loud || !this.pullFailedThisSession.has(sp.id)));
       this.quietPulls++;
       try {
         for (let i = 0; i < todo.length; i++) {
@@ -3638,7 +3813,13 @@ export default class GraphitePlugin extends Plugin {
           // window is drawn and answers, before the next one's arrive.
           if (i > 0 && this.spaceGapMs > 0) await new Promise((r) => window.setTimeout(r, this.spaceGapMs));
           await this.pullSpace(sp);
-          if (this.entriesForSpace(sp.id).length > 0) brought++; else failed.push(sp.name);
+          if (this.entriesForSpace(sp.id).length > 0) {
+            brought++;
+            this.pullFailedThisSession.delete(sp.id);
+          } else {
+            failed.push(sp.name);
+            this.pullFailedThisSession.add(sp.id);
+          }
         }
       } finally {
         this.quietPulls--;
@@ -3646,24 +3827,21 @@ export default class GraphitePlugin extends Plugin {
         // draw reads and hashes every synced note to say whether it changed.
         this.refreshPanel();
       }
-      const next = new Set([...seen, ...spaces.map((sp) => sp.id)]);
-      if (next.size !== seen.size) {
-        this.settings.spacesSeen = [...next];
-        await this.saveSettings();
-      }
       if (brought) {
         // READING IS ALL A KEY DOES. What a vault writes back is walled to the
         // space it is bound to (vault-wall.ts: an unbound vault writes
         // nowhere), so a vault nobody has bound says so here, once, rather
         // than letting the first edit find out.
         await this.fetchBinding().catch(() => null);
-        new Notice(`Graphite: brought in ${brought} space${brought === 1 ? '' : 's'} from your account.`
-          + (this.vaultBound ? '' : ' Edits go back to Graphite once you choose this vault\'s space in the plugin settings.'), 12000);
+        new Notice(`Graphite: brought in ${brought} space${brought === 1 ? "" : "s"} you mirror.`
+          + (this.vaultBound ? "" : " Edits go back to Graphite once you choose this vault's space in the plugin settings."), 12000);
       } else if (loud && !failed.length) {
-        new Notice(todo.length ? 'Graphite: nothing new to bring in.' : 'Graphite: every space you can read is already in this vault.');
+        new Notice(mirrored.length
+          ? "Graphite: every space you mirror is already in this vault."
+          : "Graphite: this vault mirrors no space yet. Choose some under Spaces to mirror in the plugin settings.");
       }
       if (failed.length) {
-        new Notice(`Graphite: could not bring in ${failed.join(', ')}. "Bring in every space" tries again.`, 12000);
+        new Notice(`Graphite: could not bring in ${failed.join(", ")}. "Bring in the spaces I mirror" tries again.`, 12000);
       }
     } finally {
       this.mirroring = false;
@@ -3672,8 +3850,8 @@ export default class GraphitePlugin extends Plugin {
   }
 
   async fetchSpaces(): Promise<SpaceInfo[]> {
-    const res = await requestUrl({ url: this.api('/spaces'), headers: this.headers });
-    return (res.json as any[]).map((s) => ({ id: s.id, name: s.name }));
+    const res = await requestUrl({ url: this.api("/spaces"), headers: this.headers });
+    return (res.json as any[]).map((s) => ({ id: s.id, name: s.name, owned: s.shared !== true }));
   }
 
   /** Default flow (R-290 simplification per Omar): whole-space sync, and
@@ -3685,7 +3863,7 @@ export default class GraphitePlugin extends Plugin {
     }
     try {
       const spaces = await this.fetchSpaces();
-      new SpacePicker(this.app, spaces, (space) => this.chooseDestination(space)).open();
+      new SpacePicker(this.app, spaces, (space) => void this.mirrorOrAsk(space).then((ok) => { if (ok) this.chooseDestination(space); })).open();
     } catch (e) {
       new Notice(`Graphite: could not list spaces — ${e}`);
     }
@@ -3702,7 +3880,7 @@ export default class GraphitePlugin extends Plugin {
     }
     try {
       const spaces = await this.fetchSpaces();
-      new SpacePicker(this.app, spaces, (space) => void this.chooseModules(space)).open();
+      new SpacePicker(this.app, spaces, (space) => void this.mirrorOrAsk(space).then((ok) => { if (ok) return this.chooseModules(space); })).open();
     } catch (e) {
       new Notice(`Graphite: could not list spaces — ${e}`);
     }
@@ -3997,7 +4175,7 @@ export default class GraphitePlugin extends Plugin {
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
       if (!this.quietPulls) new Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
-      new Notice(`Graphite: pull failed — ${e}`);
+      new Notice(`Graphite: pull failed — ${pullFailedWords(e)}`);
     }
   }
 
@@ -4145,7 +4323,7 @@ export default class GraphitePlugin extends Plugin {
           `${banked.join(', ')}. Merge back what you need, then push. Nothing was lost.`, 12000);
       }
     } catch (e) {
-      new Notice(`Graphite: pull failed — ${e}`);
+      new Notice(`Graphite: pull failed — ${pullFailedWords(e)}`);
     }
   }
 
@@ -4746,16 +4924,18 @@ export default class GraphitePlugin extends Plugin {
       }
     }
     this.settings = { ...DEFAULTS, ...data };
+    // DEFAULTS holds one `files` and one `bases`; a vault with none of its own
+    // must not be handed those, or the next plugin loaded in the same process
+    // would inherit the first one's tracked notes.
+    if (!data.files) this.settings.files = {};
+    if (!data.bases) this.settings.bases = {};
     this.settings.routeCache = Array.isArray(data.routeCache) ? data.routeCache : [];
     this.settings.routeRecent = Array.isArray(data.routeRecent) ? data.routeRecent : [];
-    this.settings.spacesSeen = Array.isArray(data.spacesSeen)
-      ? data.spacesSeen.filter((x: unknown) => typeof x === 'string') : [];
-    // A vault that already has spaces pulled by hand chose them; bringing in
-    // the rest unasked would be a surprise. An explicit choice either way
-    // is never overridden.
-    if (typeof data.mirrorAll !== 'boolean') {
-      this.settings.mirrorAll = Object.keys(this.settings.files ?? {}).length === 0;
-    }
+    // 0.6.1 to 0.6.10 kept `mirrorAll` and `spacesSeen`. Neither means anything
+    // now (the server holds the choices) and neither is carried forward.
+    delete (this.settings as any).mirrorAll;
+    delete (this.settings as any).spacesSeen;
+    this.settings.mirrorAdopted = data.mirrorAdopted === true;
     // NOTE PAGES: a state of its own, never the one object DEFAULTS holds.
     this.settings.pageModules = {};
     if (data.pageModules && typeof data.pageModules === 'object') {
@@ -5347,19 +5527,24 @@ class LpSettingTab extends PluginSettingTab {
         if (await this.plugin.checkConnection(true) && !onDevice) this.display();
       }));
     if (!onDevice && !onComputer) {
+      // 0.6.11 · WHICH SPACES THIS VAULT MIRRORS (Omar, 2026-11-18). Every
+      // space is OFF until it is switched on here. A space you own is mirrored
+      // at once; one shared with you asks its owner, and nothing is mirrored
+      // until they approve. The list draws when the server has answered, like
+      // the binding below, so the tab opens offline.
+      const mirrorList = containerEl.createDiv();
       new Setting(containerEl)
-        .setName('Bring in every space')
-        .setDesc('Once the key is linked, every space you can read is pulled into this vault, and '
-          + 'a space made later arrives the next time Obsidian opens. This only writes files '
-          + 'here. Edits go back to Graphite when you push them (or with Auto-push below), '
-          + 'into the space this vault is bound to.')
-        .addToggle((t) => t.setValue(this.plugin.settings.mirrorAll).onChange(async (v) => {
-          this.plugin.settings.mirrorAll = v;
-          await this.plugin.saveSettings();
-        }))
+        .setName('Spaces to mirror')
+        .setDesc('This vault mirrors no space until you switch it on. A space you own is mirrored at '
+          + 'once. A space shared with you waits until its owner approves it in Graphite, and the '
+          + 'owner can stop it later. Edits go back to Graphite when you push them (or with '
+          + 'Auto-push below), into the space this vault is bound to.')
         .addButton((b) => b.setButtonText('Bring in now').onClick(async () => {
-          if (await this.plugin.checkConnection(true)) await this.plugin.mirrorEverySpace(true);
+          if (await this.plugin.checkConnection(true)) await this.plugin.mirrorChosenSpaces(true);
+          await this.drawMirrorRows(mirrorList);
         }));
+      containerEl.appendChild(mirrorList);
+      this.mirrorRows = this.drawMirrorRows(mirrorList);
     }
     // A pulled space's layout is the choice of a pull, which a device has none of.
     if (!onDevice) {
@@ -5448,8 +5633,9 @@ class LpSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName('All my spaces')
         .setDesc('Off: this vault writes only into its space and the spaces inside it. On: your '
-          + 'edits go back to every space you are allowed to write in, and Graphite still '
-          + 'checks each one. Needs a space chosen above.')
+          + 'edits go back to every other space this vault mirrors (see Spaces to mirror) that '
+          + 'you are allowed to write in, and Graphite still checks each one. It never adds a '
+          + 'space. Needs a space chosen above.')
         .addToggle((t) => {
           t.setValue(false);
           t.onChange(async (v) => {
@@ -5846,6 +6032,49 @@ class LpSettingTab extends PluginSettingTab {
   setQuietly(fn: () => void) {
     this.quiet++;
     try { fn(); } finally { this.quiet--; }
+  }
+
+  /** 0.6.11 · The rows of "Spaces to mirror": one switch per space the account
+   *  can read, each as the server holds it. A switch is set from the server's
+   *  answer through setQuietly and never redraws the tab, so a refusal cannot
+   *  become the loop 0.6.10 closed. */
+  mirrorRows: Promise<void> | null = null;
+  async drawMirrorRows(list: any): Promise<void> {
+    let spaces: SpaceInfo[];
+    try {
+      spaces = await this.plugin.fetchSpaces();
+    } catch {
+      list.empty();
+      new Setting(list).setDesc('Could not list your spaces. Test the connection to try again.');
+      return;
+    }
+    const choices = (await this.plugin.fetchMirrorChoices()) ?? this.plugin.mirrorChoices;
+    list.empty();
+    if (!spaces.length) {
+      new Setting(list).setDesc('This account has no space to mirror yet.');
+      return;
+    }
+    for (const sp of spaces) {
+      const row = new Setting(list)
+        .setName(sp.owned === false ? `${sp.name} (shared with you)` : sp.name);
+      const show = (c: MirrorChoice | undefined) => row.setDesc(this.plugin.mirrorStateLine(c));
+      show(choices.get(sp.id));
+      row.addToggle((t) => {
+        const c = choices.get(sp.id);
+        t.setValue(c?.state === 'on' || c?.state === 'waiting');
+        t.onChange(async (v) => {
+          if (this.quiet) return;
+          if (v) {
+            const got = await this.plugin.chooseSpace(sp);
+            if (!got) { this.setQuietly(() => t.setValue(false)); return; }
+            show(got);
+          } else {
+            if (!(await this.plugin.unchooseSpace(sp))) { this.setQuietly(() => t.setValue(true)); return; }
+            show(undefined);
+          }
+        });
+      });
+    }
   }
 
   /** The capture inbox's choices, once the server has answered. */
