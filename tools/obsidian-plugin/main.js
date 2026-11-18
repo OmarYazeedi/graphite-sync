@@ -8080,26 +8080,29 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         d.addOption("", "Not bound \u2014 this vault writes nothing");
         d.setValue("");
         d.onChange(async (v) => {
+          if (this.quiet) return;
           await this.plugin.bindVault(v || null);
           this.display();
         });
         this.bindingChoices = Promise.all([binding, this.plugin.fetchSpaces()]).then(([b, spaces]) => {
           for (const s of spaces) d.addOption(s.id, s.name);
-          d.setValue(b?.bound && b.root ? b.root.id : "");
+          this.setQuietly(() => d.setValue(b?.bound && b.root ? b.root.id : ""));
         }).catch(() => {
         });
       });
       new import_obsidian4.Setting(containerEl).setName("All my spaces").setDesc("Off: this vault writes only into its space and the spaces inside it. On: your edits go back to every space you are allowed to write in, and Graphite still checks each one. Needs a space chosen above.").addToggle((t) => {
         t.setValue(false);
         t.onChange(async (v) => {
-          if (!await this.plugin.setAllSpaces(v)) this.display();
+          if (this.quiet || v === this.plugin.vaultAllSpaces) return;
+          if (!await this.plugin.setAllSpaces(v)) this.setQuietly(() => t.setValue(this.plugin.vaultAllSpaces));
         });
-        void binding.then((b) => t.setValue(!!(b?.bound && b.allSpaces))).catch(() => void 0);
+        void binding.then((b) => this.setQuietly(() => t.setValue(!!(b?.bound && b.allSpaces)))).catch(() => void 0);
       });
       new import_obsidian4.Setting(containerEl).setName("Capture inbox").setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds in any note that is not a synced one. The line is marked afterwards, so capturing again never makes it twice. Choose the space this vault is bound to first.').addDropdown((d) => {
         d.addOption("", "Off");
         d.setValue("");
         d.onChange(async (v) => {
+          if (this.quiet) return;
           if (!await this.plugin.setInbox(v || null)) this.display();
         });
         this.inboxChoices = binding.then(async (b) => {
@@ -8108,7 +8111,7 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
           for (const m of await this.plugin.fetchInboxChoices()) {
             if (m.id !== b.inbox?.id) d.addOption(m.id, m.label);
           }
-          d.setValue(b.inbox?.id ?? "");
+          this.setQuietly(() => d.setValue(b.inbox?.id ?? ""));
         }).catch(() => {
         });
       });
@@ -8314,6 +8317,7 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         d.addOption("", "First Notes module of the space (default)");
         d.setValue(modules[folder] ?? "");
         d.onChange(async (v) => {
+          if (this.quiet) return;
           if (v) modules[folder] = v;
           else delete modules[folder];
           await this.plugin.saveSettings();
@@ -8324,7 +8328,7 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
           if (chosen && !list.some((m) => m.id === chosen)) {
             d.addOption(chosen, "A module that is no longer available");
           }
-          d.setValue(chosen ?? "");
+          this.setQuietly(() => d.setValue(chosen ?? ""));
         });
       });
     }
@@ -8332,6 +8336,23 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
       for (const fill of pending) fill(list);
     }).catch(() => {
     });
+  }
+  /** 0.6.10 · A VALUE THE TAB SETS ITSELF IS NOT A CHOICE. Obsidian's setValue
+   *  on a toggle or a dropdown runs the component's onChange, so the choices
+   *  that arrive from the server (the binding, the inbox) used to run the very
+   *  handlers a person's click runs: All my spaces, read as on, wrote itself
+   *  back to the server, and a refusal redrew the tab, which read the binding
+   *  and set the switch again - without end, on the one thread the window
+   *  runs on. Every set made from code goes through here and handlers return
+   *  early while it runs. */
+  quiet = 0;
+  setQuietly(fn) {
+    this.quiet++;
+    try {
+      fn();
+    } finally {
+      this.quiet--;
+    }
   }
   /** The capture inbox's choices, once the server has answered. */
   inboxChoices = null;

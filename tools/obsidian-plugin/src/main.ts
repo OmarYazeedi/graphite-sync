@@ -5432,13 +5432,14 @@ class LpSettingTab extends PluginSettingTab {
           d.addOption('', 'Not bound — this vault writes nothing');
           d.setValue('');
           d.onChange(async (v) => {
+            if (this.quiet) return;
             await this.plugin.bindVault(v || null);
             this.display();
           });
           this.bindingChoices = Promise.all([binding, this.plugin.fetchSpaces()])
             .then(([b, spaces]) => {
               for (const s of spaces) d.addOption(s.id, s.name);
-              d.setValue(b?.bound && b.root ? b.root.id : '');
+              this.setQuietly(() => d.setValue(b?.bound && b.root ? b.root.id : ''));
             }).catch(() => { /* offline: the tab still opens */ });
         });
       // 2026-11-17, "All, opt-in switch": the person's own choice to lift the
@@ -5452,9 +5453,15 @@ class LpSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(false);
           t.onChange(async (v) => {
-            if (!(await this.plugin.setAllSpaces(v))) this.display();
+            // 0.6.10: a value the tab itself set is not a choice (see
+            // setQuietly), and a value the server already holds needs no write.
+            if (this.quiet || v === this.plugin.vaultAllSpaces) return;
+            // Refused: the switch goes back to what the server holds. It does
+            // NOT redraw the tab - a redraw reads the binding and sets the
+            // switch again, which is how a refusal became a loop.
+            if (!(await this.plugin.setAllSpaces(v))) this.setQuietly(() => t.setValue(this.plugin.vaultAllSpaces));
           });
-          void binding.then((b) => t.setValue(!!(b?.bound && b.allSpaces))).catch(() => undefined);
+          void binding.then((b) => this.setQuietly(() => t.setValue(!!(b?.bound && b.allSpaces)))).catch(() => undefined);
         });
       // R-1227: THE SETTING THE CAPTURE COMMAND ASKED FOR, AND THAT DID NOT
       // EXIST. Off by default: a command that files tasks into somebody's
@@ -5471,6 +5478,7 @@ class LpSettingTab extends PluginSettingTab {
           d.addOption('', 'Off');
           d.setValue('');
           d.onChange(async (v) => {
+            if (this.quiet) return;
             if (!(await this.plugin.setInbox(v || null))) this.display();
           });
           this.inboxChoices = binding.then(async (b) => {
@@ -5479,7 +5487,7 @@ class LpSettingTab extends PluginSettingTab {
             for (const m of await this.plugin.fetchInboxChoices()) {
               if (m.id !== b.inbox?.id) d.addOption(m.id, m.label);
             }
-            d.setValue(b.inbox?.id ?? '');
+            this.setQuietly(() => d.setValue(b.inbox?.id ?? ''));
           }).catch(() => { /* offline: the tab still opens */ });
         });
       // RULED 2026-09-24: the two switches for tagged lines. Separate, as
@@ -5807,6 +5815,7 @@ class LpSettingTab extends PluginSettingTab {
           d.addOption('', 'First Notes module of the space (default)');
           d.setValue(modules[folder] ?? '');
           d.onChange(async (v) => {
+            if (this.quiet) return;
             if (v) modules[folder] = v; else delete modules[folder];
             await this.plugin.saveSettings();
           });
@@ -5816,13 +5825,27 @@ class LpSettingTab extends PluginSettingTab {
             if (chosen && !list.some((m) => m.id === chosen)) {
               d.addOption(chosen, 'A module that is no longer available');
             }
-            d.setValue(chosen ?? '');
+            this.setQuietly(() => d.setValue(chosen ?? ''));
           });
         });
     }
     this.pageModuleChoices = this.pageModuleList.then((list) => {
       for (const fill of pending) fill(list);
     }).catch(() => { /* offline: the rows keep the default */ });
+  }
+
+  /** 0.6.10 · A VALUE THE TAB SETS ITSELF IS NOT A CHOICE. Obsidian's setValue
+   *  on a toggle or a dropdown runs the component's onChange, so the choices
+   *  that arrive from the server (the binding, the inbox) used to run the very
+   *  handlers a person's click runs: All my spaces, read as on, wrote itself
+   *  back to the server, and a refusal redrew the tab, which read the binding
+   *  and set the switch again - without end, on the one thread the window
+   *  runs on. Every set made from code goes through here and handlers return
+   *  early while it runs. */
+  private quiet = 0;
+  setQuietly(fn: () => void) {
+    this.quiet++;
+    try { fn(); } finally { this.quiet--; }
   }
 
   /** The capture inbox's choices, once the server has answered. */
