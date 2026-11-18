@@ -133,7 +133,11 @@ export const PROPOSAL_PART = /^(?:gr|lp):\s*(p_[A-Za-z0-9]{4,24})$/;
  */
 
 /** `>>` and what follows it, up to a tag or the end. Group 1 is the words. */
-const ROUTE_TOKEN = /(^|\s)>>\s*([^#]*?)\s*(?=\s#|$)/;
+const ROUTE_TOKEN = /(^|\s)(?:>>|»|≫|》)\s*([^#]*?)\s*(?=\s#|$)/;
+// THE OTHER MARKS ARE A STYLUS'S: handwriting converted to text (Omar
+// writes on a Boox by keyboard AND by pen, ruled 2026-11-07) reads a drawn
+// `>>` as `»`, and sometimes `≫` or `》`. Each is the token's own mark and
+// nothing else is widened — a lone `>` or `->` is still prose.
 
 export interface RouteToken {
   /** The space, as written: a name, or a path joined by ` › `. Empty when the

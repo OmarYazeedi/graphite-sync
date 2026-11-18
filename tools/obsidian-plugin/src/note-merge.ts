@@ -18,6 +18,8 @@
  *     three share at the start and the end are set aside.
  */
 
+import { LP_ID_RE } from './lp-ids';
+
 /** The largest middle (base lines × side lines) diffed. Ordinary notes
  *  differ by a few lines near each other and never come near it; a note
  *  rewritten throughout on both sides gets the conflict copy instead. */
@@ -87,13 +89,27 @@ const same = (x: Hunk, y: Hunk) =>
   && x.lines.every((l, k) => l === y.lines[k]);
 
 /** Two hunks that change the same base lines, or meet. */
-const touch = (x: Hunk, y: Hunk) => x.from <= y.to && y.from <= x.to;
+const touch = (x: Hunk, y: Hunk, adjacentOk: boolean) => {
+  if (!adjacentOk) return x.from <= y.to && y.from <= x.to;
+  // Only a shared base line is a clash. Two changes that merely meet at a
+  // boundary have an order that is not a guess — except two insertions at
+  // the very same point, whose order is.
+  if (x.from < y.to && y.from < x.to) return true;
+  return x.from === x.to && y.from === y.to && x.from === y.from;
+};
 
 export type MergeResult = { clean: true; text: string } | { clean: false };
 
 /** Both sides' edits in one text, or { clean: false } where they cannot be
- *  kept apart (the caller writes the conflict copy). */
-export function mergeLines(base: string, ours: string, theirs: string): MergeResult {
+ *  kept apart (the caller writes the conflict copy).
+ *
+ *  `adjacent: true` keeps both when the two sides changed NEIGHBOURING lines
+ *  (a line typed right under one the other side gave an id), which is the
+ *  common shape of a push that meets typing and the one thing note sync
+ *  deliberately refuses. Off unless asked for. */
+export function mergeLines(
+  base: string, ours: string, theirs: string, opts: { adjacent?: boolean } = {},
+): MergeResult {
   if (ours === theirs) return { clean: true, text: ours };
   if (ours === base) return { clean: true, text: theirs };
   if (theirs === base) return { clean: true, text: ours };
@@ -103,7 +119,7 @@ export function mergeLines(base: string, ours: string, theirs: string): MergeRes
   if (!mine || !yours) return { clean: false };
   const all: Hunk[] = [];
   for (const h of mine) {
-    const clash = yours.find((y) => touch(h, y));
+    const clash = yours.find((y) => touch(h, y, !!opts.adjacent));
     if (clash && !same(h, clash)) return { clean: false };
     all.push(h);
   }
@@ -117,4 +133,65 @@ export function mergeLines(base: string, ours: string, theirs: string): MergeRes
   }
   out.push(...b.slice(at));
   return { clean: true, text: out.join('') };
+}
+
+/* ══ OMAR, 2026-11-09 (typing-on-the-line-being-pushed) ═══════════════════
+ *
+ * "Keep your typing but carry the server's line id onto it, so no duplicate
+ * is made."
+ *
+ * A push sends a line the app has no id for; the server writes the note back
+ * with the line's id on it. If the person typed ON that very line while the
+ * request was in flight, the merge above cannot keep both (they changed the
+ * same line), so the note is left as typed — and the typed line has no id, so
+ * the next push made the task a second time.
+ *
+ * So the typed line keeps its words and takes the id the server gave the line
+ * it was typed over: [pushed] is what was sent, [typed] what the note says
+ * now, [canonical] what the server wrote back. Only a line the person
+ * REPLACED one-for-one carries an id across, and only when the typed line has
+ * no id of its own; anything less certain (a line split, joined or removed)
+ * is left exactly as typed. Pure: text in, text out. */
+const MARKER_ONLY = new RegExp('^(?:' + LP_ID_RE.source + ')$');
+// LP_ID_RE is global: test() on it keeps a position between calls.
+const HAS_ID = new RegExp(LP_ID_RE.source);
+const eolOf = (line: string) => /\r?\n$/.exec(line)?.[0] ?? '';
+
+export function carryIds(pushed: string, typed: string, canonical: string): string {
+  const p = splitLines(pushed);
+  const t = splitLines(typed);
+  const c = splitLines(canonical);
+  const typedHunks = hunks(p, t);
+  const canonHunks = hunks(p, c);
+  if (!typedHunks || !canonHunks) return typed;
+  // The marker the server added to each pushed line: the canonical line is
+  // the pushed line's words with the marker after them, nothing else changed.
+  const marker = new Map<number, string>();
+  for (const h of canonHunks) {
+    if (h.to - h.from !== h.lines.length) continue;
+    h.lines.forEach((cl, k) => {
+      const was = p[h.from + k].replace(/\r?\n$/, '');
+      const now = cl.replace(/\r?\n$/, '');
+      if (!now.startsWith(was)) return;
+      const rest = now.slice(was.length);
+      if (rest && MARKER_ONLY.test(rest)) marker.set(h.from + k, rest);
+    });
+  }
+  if (!marker.size) return typed;
+  const out = [...t];
+  // Hunks are over the pushed text; their replacement lines sit in the typed
+  // text shifted by the lines earlier hunks added or removed.
+  let shift = 0;
+  for (const h of typedHunks) {
+    if (h.to - h.from === h.lines.length) {
+      h.lines.forEach((tl, k) => {
+        const m = marker.get(h.from + k);
+        if (!m || HAS_ID.test(tl)) return;
+        const body = tl.replace(/\r?\n$/, '');
+        out[h.from + k + shift] = body + m + eolOf(tl);
+      });
+    }
+    shift += h.lines.length - (h.to - h.from);
+  }
+  return out.join('');
 }

@@ -1,6 +1,6 @@
 # Graphite Sync
 
-Graphite Sync connects your Obsidian vaults to **Graphite** in one of two
+Graphite Sync connects your Obsidian vaults to **Graphite** in one of three
 ways, chosen in the plugin settings under *Where Graphite is*:
 
 - **Server** — for anyone whose spaces are kept on a Graphite server: one you
@@ -12,6 +12,18 @@ ways, chosen in the plugin settings under *Where Graphite is*:
   shared between devices through the relay, which are on no server. The app
   writes those spaces into your vault as notes and takes in what you changed
   there; the plugin shows you where that stands. No server and no account.
+- **This computer** — for spaces kept in the Graphite app, read live while the
+  app is open on the same computer. Desktop only. Off until you turn it on in
+  the Graphite app (*Settings → Data & server → Data locations*, "Let the notes
+  plugin read Graphite on this computer"). A second switch, on by default, lets the
+  plugin change things too; turn it off for read-only. No server and no account.
+
+**How This computer works.** The Graphite app opens a door on this computer only
+(127.0.0.1, never the network) while it is running and you have allowed it; the
+plugin finds it through a small file the app leaves and asks it for your spaces.
+If the app is closed, the plugin says so. Link history, capture, ticks, the
+census, binding a note to a space and pulling only chosen modules need a server
+and say so.
 
 **How This device works.** The plugin never connects to anything in this mode.
 In the Graphite app, *Settings → Data & server → Data locations*, choose your
@@ -56,6 +68,8 @@ does not write into an Obsidian vault yet.
   lands in. Route different Spaces to different local vaults; the target
   vault's plugin is configured automatically so it can push and pull on its
   own from then on.
+- **Bring in every space** *(on by default for a new vault)* — once the key is linked, every space you can read, your own and the ones shared with you, is pulled into the vault, and a space made later arrives the next time Obsidian opens. The command *Bring in every space* does it on demand. It only writes files into this vault; edits go back when you push them, or with auto-push.
+- **All my spaces** *(off by default)* — a vault writes back only into the space it is bound to and the spaces nested in it. Turn this on in the settings, beside *This vault's space*, and your edits go back to every space you are allowed to write in; Graphite still checks each one. It needs a space chosen first, which stays where new spaces and captured lines go.
 - **Validate-first push** *(Push the current file back to Graphite)* — edits go through the server's merge importer.
   Errors come back with line numbers and *nothing* is written; on success
   the file is rewritten to the server's canonical form, so vault and app
@@ -163,7 +177,11 @@ does not write into an Obsidian vault yet.
   times, and always writes `| due: YYYY-MM-DD` with an optional `HH:MM`.
   *Graphite bar: Assign* offers the people of the space the line is going
   to and writes `| assigned:` with the exact name. *Graphite bar: Priority*
-  writes `| priority:` low, normal, high or critical. *Graphite bar: Tag*
+  writes `| priority:` low, normal, high or critical - or, when the line is
+  going to a Tasks module that names its own priorities, those names
+  (the lists file carries them, names only, for a tablet with no sign-in).
+  The capture door reads either against that module's words first.
+  *Graphite bar: Tag*
   appends a tag already in use, or a new one, to the line's words.
   *Graphite bar: Send to* is the `>>` list. They write onto the line as
   text and change nothing in Graphite until the line is captured; they
@@ -208,8 +226,9 @@ does not write into an Obsidian vault yet.
 
 1. Install and enable the plugin, open its settings.
 2. Enter your server URL and an API token, hit **Test connection**.
-3. Run **Pull a space (pick destination vault)** from the command palette
-   (or the ribbon icon → *Pull a space…*).
+3. Your spaces arrive on their own once the connection test passes. To pull
+   one by hand, or into another vault, run **Pull a space (pick destination
+   vault)** from the command palette (or the ribbon icon → *Pull a space…*).
 4. Edit the pulled file, then **Push the current file back** — or switch on
    auto-push and forget about it.
 

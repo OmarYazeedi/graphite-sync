@@ -23,6 +23,7 @@ import {
 import { RangeSetBuilder } from '@codemirror/state';
 import { FF_ENDS, FF_STARTS, LP_ID_RE, isMarkerHeaderCell, lpHiddenRanges } from './lp-ids';
 import { LP_TAIL, PROPOSAL_TAIL } from '../../../apps/api/src/spaces/vault-anchor';
+import { sectionNamesModule } from '../../../apps/api/src/spaces/vault-route';
 import { finalised, approvedText, lineOfKey, proposalsIn, readProposal } from './proposals';
 import {
   RawSpace, Route, buildRoutes, filterRoutes, frontmatterFor, frontmatterRange, insertionFor,
@@ -34,14 +35,14 @@ import {
 import { censusOf, inCensus, localDay, noteDay, type CensusNote } from './census';
 import { bodyLines } from './note-lines';
 import {
-  PRIORITIES, addTag, asTaskLine, cleanTag, insertBlock, isCaptured, listStart, nextTaskLine, readField, setField,
+  addTag, asTaskLine, cleanTag, insertBlock, isCaptured, listStart, nextTaskLine, priorityChoices, readField, setField,
 } from './toolbar-lines';
 import { readDue } from './toolbar-due';
 import {
-  type ListKind, destinationOf, listTargets, suggestedTarget, targetLabel, targetToken,
+  type ListKind, destinationOf, listTargets, suggestedTarget, targetLabel, targetToken, taskModuleOf,
 } from './toolbar-where';
 import {
-  type ToolbarLists, type ToolbarPerson, TOOLBAR_LISTS_PATH, buildLists, listsFile, readListsFile, sameLists,
+  type ToolbarLists, type ToolbarPerson, TOOLBAR_LISTS_PATH, buildLists, listsFile, readListsFile, sameLists, wordsFromSettings, type ToolbarWords,
 } from './toolbar-lists';
 import { DueModal, PickModal, type Anchor, type PickItem } from './toolbar-ui';
 import { barWanted } from './toolbar-bar';
@@ -64,6 +65,12 @@ import { Handshake, outdatedSentence, readHandshake } from './handshake';
 // from, with no server (device-mirror.ts says what is read of what it leaves).
 import { lookForMirror, mirrorSentence, mirrorShort, type MirrorLook } from './device-mirror';
 export { MIRROR_INDEX, ago, lookForMirror, mirrorSentence, mirrorShort } from './device-mirror';
+// THIS COMPUTER: the Graphite app on the same machine as a place to read
+// spaces from, with no server (device-door.ts says how it is found).
+import {
+  doorBase, doorFileCandidates, doorSentence, doorShort, findDoor, type DoorLook,
+} from './device-door';
+export { DOOR_ENV, doorFileCandidates, findDoor, readDoor } from './device-door';
 // The pure halves, exported so the suite can read them off the bundle.
 export { isBelow, readHandshake } from './handshake';
 export { recordAt, pickerRoles } from './links';
@@ -73,6 +80,11 @@ export { noteSpace, frontmatterFor, buildRoutes } from './routing';
 export { readProposal, finalised, approvedText, proposalLine, proposalsIn } from './proposals';
 export { censusOf } from './census';
 export { agentBriefNote, contractProblems } from './agent';
+// R-8336: a notebook page is its own file; what a vault rename says about it.
+import { isPageText, notebookDirOf, pageIdOf, pageRenameOf, setPageFields } from './page-files';
+export {
+  baseOf, dirOf, isPageText, notebookDirOf, pageFieldsOf, pageIdOf, pageRenameOf, setPageFields,
+} from './page-files';
 // THE GRAPHITE BAR: what the pickers write and where a line goes, exported for the suite.
 export * from './toolbar-lines';
 export * from './toolbar-due';
@@ -93,13 +105,15 @@ import { SESSION_STAMP_EVERY_MS } from '../../../apps/api/src/auth/session-stamp
 import { CouchClient, LIVE_WAIT_MS, LiveFollower, noteLiveBadge, type LiveState } from './couch-client';
 import { NOTE_SYNC_KINDS, NOTE_SYNC_LABELS, type NoteSyncKind, type TransportCheck } from './note-sync';
 import { SETTINGS_NOTE_PATH, noteMatches, readSettingsNote, settingsNoteText } from './sync-config';
-import { PageSync } from './pages';
+import { PageSync, pageModuleFor, parseFolders } from './pages';
 import { CouchNoteTransport } from './couch-notes';
 import {
   NoteSyncEngine, emptyNoteSyncState, type NoteBaseStore, type NoteSyncReport, type NoteSyncState,
   type NoteVault,
 } from './note-engine';
 import { sha256Hex as noteSha } from './note-crypto';
+import { carryIds, mergeLines } from './note-merge';
+import { conflictCopyPath } from './note-engine';
 export {
   CouchClient, CouchDocSync, CouchError, LiveFollower, COUCH_DB_NAME, PULL_PAGE,
   LIVE_BACKOFF_FIRST_MS, LIVE_BACKOFF_MAX_MS, noteLiveBadge,
@@ -111,7 +125,7 @@ export {
 export { CouchNoteTransport, INLINE_SEAL_MAX, NoteSyncRefusal, SEAL_ATTACHMENT } from './couch-notes';
 export { NoteSyncEngine, conflictCopyPath, emptyNoteSyncState, mergeable } from './note-engine';
 export { MERGE_MAX_CELLS, mergeLines, splitLines } from './note-merge';
-export { fingerprint, hasRoutingHeading, inPageFolder, isPage, parseFolders } from './pages';
+export { fingerprint, hasRoutingHeading, inPageFolder, isPage, pageModuleFor, parseFolders } from './pages';
 export {
   KEPT_OUT, NOTE_KEYS, SECRET_KEYS, SETTINGS_NOTE_PATH, noteMatches, readSettingsNote, settingsNoteText,
 } from './sync-config';
@@ -270,8 +284,10 @@ interface VaultDest { name: string; path: string; current: boolean; }
 interface ExportedFile {
   path: string;
   markdown: string;
-  kind: 'index' | 'module';
+  kind: 'index' | 'module' | 'page';
   moduleId?: string;
+  /** R-8336: on `kind: 'page'`, the note this file IS. */
+  noteId?: string;
 }
 
 interface FileEntry {
@@ -285,20 +301,47 @@ interface FileEntry {
   moduleCount?: number;  // total modules in the space at pull time (for "3/7")
   /** R-379 folder layout. Absent on files pulled as a single package, which
    *  is what every pre-0.3.0 mapping is — so absence means "one file". */
-  role?: 'index' | 'module';
+  role?: 'index' | 'module' | 'page';
   moduleId?: string;
+  /** R-8336: a page of a notebook is a file of its own (role 'page'): the note
+   *  it IS, and the folder of the notebook it sits in, so a rename in the vault
+   *  can be read as a new title (the name) or a new section (the folder). */
+  noteId?: string;
+  pageDir?: string;
   folder?: string;
+  /** FINDING 119: set only when this space's folder was asked for by name,
+   *  because the default one belongs to another space. Asked again on every
+   *  pull and every check, so the folder stays this space's. */
+  folderAsked?: string;
 }
 
 interface LpSettings {
   /** Where this vault gets Graphite: a server (the default, and every
    *  vault made before this existed), or the Graphite app on this device,
    *  which writes the notes into the vault itself. */
-  source: 'server' | 'device';
+  source: 'server' | 'device' | 'computer';
+  /** 'computer' asks the Graphite app on this computer through the loopback door
+   *  it leaves (device-door.ts); the address and key are read from the file it
+   *  leaves each time, because both change when the app restarts. */
   serverUrl: string;
   token: string;
   /** vault file path -> synced space. */
   files: Record<string, FileEntry>;
+  /** 0.6.1 · LINKING IS ENOUGH (Omar, 2026-11-17: "once the graphite plugin is
+   *  installed in obsidian and linked with a key, it should be as simple as
+   *  mirror"). On: every space the key can read that this vault has not been
+   *  offered yet is pulled in when the connection is checked - the first link
+   *  brings them all, and a space made later arrives the next time Obsidian
+   *  opens. It only WRITES FILES INTO THIS VAULT; nothing leaves the machine,
+   *  and pushing edits back stays the separate auto-push switch (RU-035). A
+   *  vault that already chose its spaces by hand, before this existed, keeps
+   *  it off until the person turns it on. */
+  mirrorAll: boolean;
+  /** The ids of the spaces this vault has been offered, so one the person
+   *  stopped syncing (or whose pull failed) is not brought back or retried at
+   *  every check. "Bring in every space" on the command is the explicit ask
+   *  and ignores it. */
+  spacesSeen: string[];
   /** ROW 2514 (R-2841): THE TEXT EACH SYNCED NOTE HAD WHEN THE SERVER LAST
    *  WROTE IT — what a pull put in the file, or the canonical text a push
    *  wrote back. Sent as `base` on the next push so the server can tell a
@@ -349,6 +392,15 @@ interface LpSettings {
    *  Comma-separated. Empty by default (RU-035): it sends note text off the
    *  machine. A note holding a routing heading is a page whatever this says. */
   pageFolders: string;
+  /** NOTE PAGES: pages have their own switch (Omar 2026-11-07, "Own switch,
+   *  still needs a space"). Off until turned on (RU-035): it sends note text
+   *  off the machine. The vault must be bound to a space; a capture inbox is
+   *  not needed. A vault that had already listed page folders before this
+   *  switch existed keeps sending - naming them was its consent. */
+  pagesOn: boolean;
+  /** NOTE PAGES: the Notes module chosen for each page folder, by folder.
+   *  A folder with no entry files in the bound space's first Notes module. */
+  pageModules: Record<string, string>;
   /** NOTE PAGES: each path sent, with the fingerprint of the text last sent -
    *  so an unchanged note is not sent again and a delete is known to matter. */
   pagesSent: Record<string, string>;
@@ -429,9 +481,9 @@ interface LpSettings {
  * A default is an answer to "what did you build this for". This one said
  * "an archive", and he asked for a vault twice. */
 const DEFAULTS: LpSettings = {
-  source: 'server', serverUrl: '', token: '', files: {}, bases: {}, autoPush: false, hideIds: true,
+  source: 'server', serverUrl: '', token: '', files: {}, mirrorAll: true, spacesSeen: [], bases: {}, autoPush: false, hideIds: true,
   layout: 'folder', vaultId: '',
-  captureAnyTagged: false, captureTags: '', autoCapture: false, pageFolders: '', pagesSent: {}, ticks: {}, censusOn: false,
+  captureAnyTagged: false, captureTags: '', autoCapture: false, pageFolders: '', pagesOn: false, pageModules: {}, pagesSent: {}, ticks: {}, censusOn: false,
   agentOn: false, agentFolders: '', routingList: null,
   routeCache: [], routeRecent: [],
   noteSync: 'off', couchUrl: '', couchDb: '', couchUser: '', couchPassword: '', liveSync: true,
@@ -450,6 +502,10 @@ const VAULT_HEADER = 'x-graphite-vault';
  *  path forgot to check, it fails at once instead of reaching a server the
  *  vault was once set to. */
 const NO_SERVER = 'http://127.0.0.1:1';
+/** Where a request to the app on this computer goes when the app has left no
+ *  door: a port nothing listens on, so it fails at once and the connection
+ *  check has already said why in words. */
+const NO_DOOR = 'http://127.0.0.1:1';
 
 /** A version-4 UUID. `crypto.randomUUID` where the runtime has it, and the
  *  same 122 random bits by hand where it does not (an older mobile
@@ -471,6 +527,9 @@ interface VaultBinding {
   root?: { id: string; name: string; open: boolean };
   inbox?: { id: string; name: string; spaceName: string } | null;
   inboxCleared?: boolean;
+  /** "All my spaces" (Omar, 2026-11-17): the person's own switch, held on the
+   *  binding. Absent from a server that predates it, which reads as off. */
+  allSpaces?: boolean;
 }
 
 /** The marker a captured line carries — THE pattern vault-capture.ts reads on
@@ -494,6 +553,8 @@ const CAPTURE_TASK_LINE = /^\s*[-*]\s+\[( |x|X)\]\s*\S/;
  *  server decides which tags the switches take; this only avoids sending
  *  lines that could not possibly qualify. */
 const CAPTURE_TAGGED_LINE = /(^|\s)#[\p{L}\p{N}_/-]+/u;
+/** …or a plain bullet, which counts only under a heading that names a module. */
+const CAPTURE_BULLET = /^\s*[-*+]\s+\S/;
 
 /** R-1227: the 0-based indexes of the lines worth sending to capture.
  *
@@ -502,12 +563,22 @@ const CAPTURE_TAGGED_LINE = /(^|\s)#[\p{L}\p{N}_/-]+/u;
  *  example of a task, and capturing it files somebody's documentation into
  *  their inbox. Never a blank line: the server refuses a batch holding one. */
 export function captureCandidates(lines: string[], tagged = false): number[] {
+  // RULED 2026-11-07: a plain bullet is a candidate when the heading it sits
+  // under NAMES A MODULE (`## Meeting >> Work / Thread`) — the server decides
+  // whether that module is a Notes one, and files it there or leaves it as
+  // prose. The heading is the nearest one above, the same reading as
+  // sectionFor, kept as a running value because this walks every line.
+  let heading: string | undefined;
   // OC4: A PROPOSAL IS NOT A CAPTURE CANDIDATE. Only approval sends it,
   // and without its key. The server refuses one anyway; not sending it is
   // what keeps a scan from reporting the agent's suggestions as refusals.
-  return bodyLines(lines).filter((i) => !PROPOSAL_TAIL.test(lines[i])
-    && (CAPTURE_TASK_LINE.test(lines[i])
-      || (tagged && CAPTURE_TAGGED_LINE.test(lines[i]))));
+  return bodyLines(lines).filter((i) => {
+    if (/^#{1,6}\s/.test(lines[i].trim())) { heading = lines[i]; return false; }
+    return !PROPOSAL_TAIL.test(lines[i])
+      && (CAPTURE_TASK_LINE.test(lines[i])
+        || (tagged && CAPTURE_TAGGED_LINE.test(lines[i]))
+        || (CAPTURE_BULLET.test(lines[i]) && sectionNamesModule(heading)));
+  });
 }
 
 /** OC6: every two-way box in a note — a task line carrying a hidden id,
@@ -565,6 +636,10 @@ function firstOf(text: string, marks: readonly string[], from: number): { at: nu
 
 export function keepFreeform(old: string | null, fresh: string): string {
   if (!old) return fresh;
+  // R-8336: the file of a page is the text of the page and has no freeform block of
+  // the server's; a page that quotes the two markers must not have them read as
+  // one, here or at any of the places that compare the splice with the file.
+  if (isPageText(fresh)) return fresh;
   const a = firstOf(old, FF_STARTS, 0);
   if (!a) return fresh;
   const b = firstOf(old, FF_ENDS, a.at + a.len);
@@ -723,6 +798,28 @@ const BASE_MAX_ONE = 400_000;
 /** Put one base in, newest last, and evict from the front past the caps. A
  *  note too large to keep has no base, and loses any older one: a stale
  *  base is worse than none, it would name the wrong text as last seen. */
+/** FINDING 119: whether a DIFFERENT space already syncs into [folder] in this
+ *  vault. Case-insensitive, because two of the three platforms are. */
+function folderHeldByAnother(files: Record<string, FileEntry>, folder: string, spaceId: string): boolean {
+  const lower = folder.toLowerCase();
+  return Object.values(files).some((e) => e.spaceId !== spaceId && e.folder?.toLowerCase() === lower);
+}
+
+/** FINDING 119: the name a space takes when its own is a neighbour's — the
+ *  name, and the end of its id, which does not change when it is renamed. */
+function distinctFolder(name: string, spaceId: string): string {
+  return `${name} (${spaceId.slice(-6)})`;
+}
+
+/** FINDING 119: the note a package-layout space is pulled into: `<name>.md`,
+ *  or `<name> (<end of id>).md` when another space holds that name. */
+function singleFileFor(files: Record<string, FileEntry>, space: { id: string; name: string }): string {
+  const stem = space.name.replace(/[\\/:*?"<>|]/g, '_');
+  const plain = `${stem}.md`;
+  const held = Object.entries(files).some(([p, e]) => e.spaceId !== space.id && p.toLowerCase() === plain.toLowerCase());
+  return held ? `${distinctFolder(stem, space.id)}.md` : plain;
+}
+
 function putBase(bases: Record<string, string>, path: string, text: string): void {
   delete bases[path];
   if (text.length > BASE_MAX_ONE) return;
@@ -794,6 +891,9 @@ export default class GraphitePlugin extends Plugin {
    *  Held in memory only, refreshed by every binding read, and false until
    *  one answers, so no tick reaches a server before capture is known on. */
   captureOn = false;
+  /** Whether this vault is bound to a space, as the server last said - the
+   *  half of captureOn that pages need (they never touch the inbox). */
+  vaultBound = false;
   /** OC4: per-note timers for the two gestures read off a line. */
   private gestureTimers: Record<string, number> = {};
   /** How long a note must sit still before a tick or an un-italicised line
@@ -802,6 +902,13 @@ export default class GraphitePlugin extends Plugin {
   /** Said once per session, not on every keystroke. */
   private toldNoInbox = false;
   private pushTimers: Record<string, number> = {};
+  /** FINDING 120: THE PATHS A PUSH IS IN FLIGHT FOR. A second push of the
+   *  same note while one is running read the same file, sent the same new
+   *  sections without ids, and made every one of them twice. The second
+   *  asks to run again instead (the value is how it was asked), once the
+   *  first has written the ids back, and sends what the file says by then. */
+  private pushing = new Map<string, true>();
+  private pushAgain = new Map<string, { auto?: boolean; force?: boolean } | undefined>();
   lastMe: { name?: string; email?: string } | null = null;
   lastHealth: { version?: string } | null = null;
 
@@ -831,7 +938,7 @@ export default class GraphitePlugin extends Plugin {
    *  when. null with a report is a list that could not be had — said as
    *  that, never as an empty list, which would read "no other devices". */
   devices: DeviceEntry[] | null = null;
-  devicesReport: null | 'old-server' | 'refused' | 'failed' | 'device' = null;
+  devicesReport: null | 'old-server' | 'refused' | 'failed' | 'device' | 'computer' = null;
 
   /** REGISTER 1527: what the server said about the oldest plugin it
    *  accepts, read off GET /health. null until a server has answered. */
@@ -930,6 +1037,7 @@ export default class GraphitePlugin extends Plugin {
     window.setTimeout(() => void this.checkConnection(false), 800);
 
     this.addCommand({ id: 'lp-open-panel', name: 'Open the sync panel', callback: () => this.openPanel() });
+    this.addCommand({ id: 'lp-pull-all', name: 'Bring in every space', callback: () => void this.mirrorEverySpace(true) });
     this.addCommand({ id: 'lp-pull-space', name: 'Pull a space (pick destination vault)', callback: () => this.chooseAndPull() });
     this.addCommand({ id: 'lp-pull-selective', name: 'Pull a space into THIS vault, choosing modules', callback: () => this.chooseAndPullSelective() });
     this.addCommand({ id: 'lp-push-file', name: 'Push the current file back to Graphite', callback: () => this.pushCurrent() });
@@ -1008,8 +1116,9 @@ export default class GraphitePlugin extends Plugin {
     // NOTE PAGES: a note that is a page is sent whole, on the same quiet-wait
     // (pages.ts says what makes one and when it goes).
     this.pages = new PageSync({
-      on: () => this.captureOn && !this.onDevice,
+      on: () => this.settings.pagesOn && this.vaultBound && !this.offServer,
       folders: () => this.settings.pageFolders,
+      moduleFor: (p) => pageModuleFor(p, this.settings.pageFolders, this.settings.pageModules),
       vaultName: () => this.app.vault.getName(),
       excluded: (p) => !!this.settings.files[p] || isAgentFile(p) || p === SETTINGS_NOTE_PATH || p.startsWith('.'),
       isOpen: (p) => this.app.workspace.getActiveFile()?.path === p,
@@ -1104,9 +1213,7 @@ export default class GraphitePlugin extends Plugin {
       if (!this.settings.autoPush || this.writingBack > 0) return;
       if (!(f instanceof TFile) || !this.settings.files[f.path]) return;
       // Row 1515: an index note auto-pushes too, for its links table.
-      window.clearTimeout(this.pushTimers[f.path]);
-      this.pushTimers[f.path] = window.setTimeout(
-        () => void this.pushFile(f.path, { auto: true }), 2500);
+      this.schedulePush(f.path);
     }));
 
     /* ══ ROW 2375 · THE SETTINGS NOTE (R-4650) ══════════════════════════
@@ -1149,13 +1256,28 @@ export default class GraphitePlugin extends Plugin {
     // so its base goes (the entry stays, as it always has, shown as missing).
     this.registerEvent(this.app.vault.on('delete', (f: unknown) => {
       const gone = (f as { path?: string } | null)?.path;
+      // R-8336: a tracked page's file deleted by the person. The base stays
+      // (the entry does, shown as missing) until the page is dealt with.
+      if (gone && this.writingBack === 0 && this.settings.files[gone]?.role === 'page') {
+        this.pageVanished(gone);
+        this.noteSyncSoon();
+        return;
+      }
       if (gone && this.settings.bases[gone] !== undefined) {
         delete this.settings.bases[gone];
         void this.saveSettings();
       }
       this.noteSyncSoon();
     }));
-    this.registerEvent(this.app.vault.on('rename', (_f: unknown, from: string) => {
+    this.registerEvent(this.app.vault.on('rename', (f: unknown, from: string) => {
+      // R-8336: a page's file renamed or moved by the person: its title or its
+      // section changed, and the tracking and base move with the file.
+      const to = (f as { path?: string } | null)?.path;
+      if (this.writingBack === 0 && typeof from === 'string' && to && this.settings.files[from]?.role === 'page') {
+        void this.pageRenamed(from, to);
+        this.noteSyncSoon();
+        return;
+      }
       if (typeof from === 'string' && this.settings.bases[from] !== undefined) {
         delete this.settings.bases[from];
         void this.saveSettings();
@@ -1519,7 +1641,21 @@ export default class GraphitePlugin extends Plugin {
    * a person never reads a raw failure from a call that was never going to
    * be made. */
 
+  /* ══ THIS COMPUTER ═══════════════════════════════════════════════════════
+   *
+   * One switch, `source`, decides where every request goes, and everything
+   * below it asks `endpoint()` instead of reading the server settings. So
+   * the Graphite app on this computer answers the calls a server answers
+   * (the allowlist is on its side), and what it does not answer is stopped
+   * HERE, with a sentence, by `needsServer` — a person never reads a raw
+   * 404 from a route the app was never going to have. */
+
   get onDevice(): boolean { return this.settings.source === 'device'; }
+
+  get onComputer(): boolean { return this.settings.source === 'computer'; }
+
+  /** Neither a device nor a computer asks a server: what needs one stops. */
+  get offServer(): boolean { return this.onDevice || this.onComputer; }
 
   /** What the vault last said the app left in it. Null until looked at. */
   mirrorLook: MirrorLook | null = null;
@@ -1535,10 +1671,44 @@ export default class GraphitePlugin extends Plugin {
     return this.mirrorLook;
   }
 
+  private doorSeen: { at: number; look: DoorLook } | null = null;
+
+  /** The door of the app, found in the file it leaves. Kept for a few seconds so
+   *  a burst of requests reads the file once; `fresh` always reads it, and a
+   *  connection check does, because that is where a restarted app is
+   *  noticed. A phone has no app and no files to read. */
+  doorLook(fresh = false): DoorLook {
+    if (!Platform.isDesktopApp) return { ok: false, why: 'phone' };
+    const now = Date.now();
+    if (!fresh && this.doorSeen && now - this.doorSeen.at < 3000) return this.doorSeen.look;
+    const look = this.readDoorFile();
+    this.doorSeen = { at: now, look };
+    return look;
+  }
+
+  private readDoorFile(): DoorLook {
+    const req = (window as any).require;
+    if (!req) return { ok: false, why: 'phone' };
+    try {
+      const fs = req('fs'); const p = req('path');
+      const proc = (globalThis as any).process;
+      return findDoor(
+        doorFileCandidates(proc?.env ?? {}, proc?.platform ?? '', (...a: string[]) => p.join(...a)),
+        (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } },
+      );
+    } catch {
+      return { ok: false, why: 'unreadable' };
+    }
+  }
+
   /** Where requests go and the key they carry, or null when there is
    *  nowhere to send them. A device has no server to send anything to. */
   endpoint(): { base: string; token: string } | null {
     if (this.onDevice) return null;
+    if (this.onComputer) {
+      const look = this.doorLook();
+      return look.ok ? { base: doorBase(look.door), token: look.door.key } : null;
+    }
     if (!this.settings.serverUrl || !this.settings.token) return null;
     return { base: this.settings.serverUrl.replace(/\/+$/, ''), token: this.settings.token };
   }
@@ -1556,6 +1726,11 @@ export default class GraphitePlugin extends Plugin {
           + 'notes into the vault itself. There is nothing to pull or push here.',
       };
     }
+    if (this.onComputer) {
+      const look = this.doorLook();
+      const why = look.ok ? 'no-file' : look.why;
+      return { short: doorShort(why), long: doorSentence(why) };
+    }
     return { short: 'not configured', long: 'set the server URL and API token in settings first.' };
   }
 
@@ -1563,27 +1738,36 @@ export default class GraphitePlugin extends Plugin {
   noConnectionNote(): string {
     return this.onDevice
       ? `Graphite: ${this.notConfigured().long}`
+      : this.onComputer
+      ? `Graphite: no connection — ${this.notConfigured().long}`
       : 'Graphite: no connection — check the server URL and token in settings.';
   }
 
   /** A feature that needs a server, asked for while this vault reads from
-   *  the Graphite app on this device. True means it was said and the caller
-   *  stops. Said once a session when `loud` is false, for the ones that run
+   *  the Graphite app on this device or computer. True means it was said and the
+   *  caller stops. Said once a session when `loud` is false, for the ones that run
    *  on their own (a ticked box, a census). */
   needsServer(what: string, loud = true): boolean {
-    if (!this.onDevice) return false;
+    if (!this.offServer) return false;
     if (loud || !this.toldDevice.has(what)) {
       new Notice(`Graphite: ${what} needs a Graphite server. The Graphite app on this `
-        + 'device does not do it for a notes app, so nothing was changed.', 10000);
+        + (this.onComputer
+          ? 'computer does not do it for a notes app yet, so nothing was changed.'
+          : 'device does not do it for a notes app, so nothing was changed.'), 10000);
       this.toldDevice.add(what);
     }
     return true;
   }
   private toldDevice = new Set<string>();
+  /** The app on this computer said it lets notes apps read and not change.
+   *  Remembered so an auto-push does not say it again on every edit. */
+  computerReadOnly = false;
 
   api(path: string) {
     const base = this.onDevice
       ? NO_SERVER
+      : this.onComputer
+      ? (this.endpoint()?.base ?? NO_DOOR)
       : this.settings.serverUrl.replace(/\/+$/, '');
     return `${base}/api${path}`;
   }
@@ -1593,7 +1777,7 @@ export default class GraphitePlugin extends Plugin {
     // from a vault that is not bound — so a write cannot slip past the wall
     // by being sent from a code path that forgot to ask.
     return {
-      Authorization: `Bearer ${this.onDevice ? '' : this.settings.token}`,
+      Authorization: `Bearer ${this.onDevice ? '' : this.onComputer ? (this.endpoint()?.token ?? '') : this.settings.token}`,
       [VAULT_HEADER]: this.settings.vaultId,
     };
   }
@@ -1643,11 +1827,17 @@ export default class GraphitePlugin extends Plugin {
       // server stop here, and say the notes are the app's to write.
       return false;
     }
+    // The app on this computer may have restarted since the last look: its
+    // port and key are new every time, so a check reads the file again.
+    if (this.onComputer) {
+      this.doorLook(true);
+      this.computerReadOnly = false;
+    }
     if (!this.configured) {
       this.lastMe = null; this.lastHealth = null; this.lastCheck = null;
       const say = this.notConfigured();
       this.setStatus(say.short, 'bad');
-      if (loud) new Notice(`Graphite: ${say.long}`);
+      if (loud) new Notice(`Graphite: ${say.long}`, this.onComputer ? 12000 : undefined);
       this.refreshPanel();
       return false;
     }
@@ -1659,12 +1849,14 @@ export default class GraphitePlugin extends Plugin {
       ]);
       this.lastMe = me.json;
       this.lastHealth = health?.json ?? null;
-      const who = this.lastMe?.name ?? this.lastMe?.email ?? 'connected';
+      const who = this.onComputer
+        ? 'this computer'
+        : this.lastMe?.name ?? this.lastMe?.email ?? 'connected';
       this.lastCheck = {
         at: Date.now(), ok: true,
         detail: [
           this.lastHealth?.version ? `Graphite ${this.lastHealth.version}` : '',
-          `signed in as ${who}`,
+          this.onComputer ? 'read from this computer, no server' : `signed in as ${who}`,
         ].filter(Boolean).join(' · '),
       };
       if (this.handshake?.outdated) {
@@ -1675,7 +1867,11 @@ export default class GraphitePlugin extends Plugin {
         if (loud) new Notice(outdatedSentence(this.handshake, 'written'), 12000);
       } else {
         this.setStatus(who, 'ok');
-        if (loud) new Notice(`Graphite: connected as ${who}.`);
+        if (loud) {
+          new Notice(this.onComputer
+            ? 'Graphite: connected to the Graphite app on this computer.'
+            : `Graphite: connected as ${who}.`);
+        }
       }
       this.refreshPanel();
       this.refreshLinks();
@@ -1688,14 +1884,22 @@ export default class GraphitePlugin extends Plugin {
       // OC5 refreshes the routes itself, so it is either/or, not both.
       if (this.settings.agentOn) void this.publishAgentContract();
       else void this.refreshRoutes();
+      // Linking is enough: whatever space the key can read and this vault has
+      // not been offered comes in now.
+      void this.mirrorEverySpace(false);
       return true;
     } catch (e: any) {
       this.lastMe = null;
       const status = e?.status ?? '';
-      const why = status === 401 ? 'token rejected (expired or revoked?)' : `unreachable (${status || e})`;
+      // The file named a port and nothing answered on it: the app is closed
+      // (it removes the file when it closes cleanly, so this is a crash or a
+      // kill). Said as that, not as a socket error.
+      const why = this.onComputer
+        ? status === 401 ? 'Graphite did not accept the key; choose This computer again' : doorShort('refused')
+        : status === 401 ? 'token rejected (expired or revoked?)' : `unreachable (${status || e})`;
       this.lastCheck = { at: Date.now(), ok: false, detail: why };
       this.setStatus(why, 'bad');
-      if (loud) new Notice(`Graphite: ${why}`);
+      if (loud) new Notice(`Graphite: ${this.onComputer && status !== 401 ? doorSentence('refused') : why}`);
       this.refreshPanel();
       return false;
     }
@@ -1790,6 +1994,9 @@ export default class GraphitePlugin extends Plugin {
     if (this.onDevice) {
       throw new Error('link history needs a Graphite server');
     }
+    if (this.onComputer) {
+      throw new Error('the Graphite app on this computer does not keep link history for a notes app yet');
+    }
     const res = await requestUrl({
       url: this.api(`/records/${r.kind}/${encodeURIComponent(r.id)}/links`),
       headers: this.headers, throw: false,
@@ -1826,7 +2033,7 @@ export default class GraphitePlugin extends Plugin {
   async reportVault() {
     // The app on this device has no folder dropdown of vaults to put this
     // one in, so there is nothing to report and nothing to say.
-    if (this.onDevice) { this.vaultReport = null; this.refreshPanel(); return; }
+    if (this.offServer) { this.vaultReport = null; this.refreshPanel(); return; }
     try {
       const name = this.app.vault.getName();
       // ── 2026-11-07: THEIR OWN LIST FIRST, THEN THE OLD OPERATOR ROUTE ───
@@ -1870,8 +2077,8 @@ export default class GraphitePlugin extends Plugin {
    *  Asked when the settings tab opens — where a person looks — rather than
    *  on every connection check, which runs on its own every few minutes. */
   async fetchDevices(): Promise<void> {
-    if (this.onDevice) {
-      this.devices = null; this.devicesReport = 'device';
+    if (this.offServer) {
+      this.devices = null; this.devicesReport = this.onComputer ? 'computer' : 'device';
       return;
     }
     if (!this.settings.serverUrl || !this.settings.token) {
@@ -1908,7 +2115,7 @@ export default class GraphitePlugin extends Plugin {
   serversOnThisMachine(): ServerUse[] {
     // A vault that reads from the app on this device has no server of its
     // own to list.
-    const configs: { vault: string; url: string; here: boolean }[] = this.onDevice
+    const configs: { vault: string; url: string; here: boolean }[] = this.offServer
       ? [] : [{ vault: 'This vault', url: this.settings.serverUrl, here: true }];
     if (Platform.isDesktopApp) {
       const req = (window as any).require;
@@ -2896,13 +3103,17 @@ export default class GraphitePlugin extends Plugin {
     const text = note && this.barFieldLine(note);
     if (!note || text === null) return;
     const line = note.line;
-    const current = readField(text, 'priority')?.toLowerCase();
+    const current = readField(text, 'priority')?.replace(/\\\|/g, '|').toLowerCase();
+    // IN THE WORDS OF THE MODULE THE LINE IS GOING TO (a Tasks module can name
+    // its own priorities): the destination is read as the server will read it.
+    const lists = await this.barLists();
+    const inbox = lists?.bound.inboxModuleId ?? null;
+    const moduleId = taskModuleOf(destinationOf(note.lines, note.line, this.routes(), inbox), inbox);
+    const choices = priorityChoices(moduleId ? lists?.words[moduleId] : null);
     new PickModal<string>(this.app, this.barMobile, this.barAnchor(editor), {
       title: 'Priority',
-      items: PRIORITIES.map((p) => ({
-        label: p[0].toUpperCase() + p.slice(1), hint: p === 'normal' ? 'default' : undefined, data: p,
-      })),
-      start: (i) => i.data === current,
+      items: choices.map((c) => ({ label: c.label, hint: c.hint, data: c.value })),
+      start: (i) => i.data.replace(/\\\|/g, '|').toLowerCase() === current,
       writes: (i) => `Writes | priority: ${i.data}`,
       onChoose: (i) => this.barWrite(editor, line, setField(asTaskLine(editor.getLine(line) ?? ''), 'priority', i.data)),
     }).open();
@@ -3019,7 +3230,7 @@ export default class GraphitePlugin extends Plugin {
    *  be reached the file stands as it was. Names only: toolbar-lists.ts has
    *  no field for a token, an address, a vault id or a password. */
   async publishToolbarLists(opts: { loud?: boolean } = {}) {
-    if (!this.settings.barShare || !this.configured || this.onDevice) {
+    if (!this.settings.barShare || !this.configured || this.offServer) {
       if (opts.loud) new Notice('Graphite: the picker lists are written only while connected, with sharing on in the settings.');
       return;
     }
@@ -3075,7 +3286,7 @@ export default class GraphitePlugin extends Plugin {
    *  use and the vault's binding. False when it could not be had — the last
    *  build stands. */
   async refreshToolbarLists(): Promise<boolean> {
-    if (!this.configured || this.onDevice) return false;
+    if (!this.configured || this.offServer) return false;
     if (!(await this.refreshRoutes())) return false;
     const spaces = this.settings.routeCache;
     const before = this.settings.toolbarCache;
@@ -3097,9 +3308,24 @@ export default class GraphitePlugin extends Plugin {
     let tags = before?.tags ?? [];
     const t = await requestUrl({ url: this.api('/tags'), headers: this.headers, throw: false }).catch(() => null);
     if (t && t.status < 300 && Array.isArray(t.json)) tags = (t.json as { name?: string }[]).map((x) => String(x.name ?? '')).filter(Boolean);
+    // A TASKS MODULE'S OWN WORDS for status and priority (names and what each
+    // counts as), so the Priority picker can offer them on a tablet with no
+    // server. A module that cannot be asked keeps the words it had; a server
+    // that does not know the route has none to carry.
+    const words: Record<string, ToolbarWords> = {};
+    for (const s of routable(spaces)) {
+      for (const mod of (s.modules ?? []).filter((m) => m.type === 'TASKS')) {
+        const res = await requestUrl({ url: this.api(`/modules/${mod.id}/task-settings`), headers: this.headers, throw: false }).catch(() => null);
+        if (res && res.status < 300) {
+          const w = wordsFromSettings(res.json);
+          if (w) words[mod.id] = w;
+        } else if (before?.words?.[mod.id]) words[mod.id] = before.words[mod.id];
+      }
+    }
     this.settings.toolbarCache = buildLists({
       at: new Date().toISOString(), bound, spaces, people,
       tags: [...tags, ...spaces.flatMap((s) => s.tags ?? [])],
+      words,
     });
     await this.saveSettings();
     return true;
@@ -3223,26 +3449,34 @@ export default class GraphitePlugin extends Plugin {
   async fetchBinding(): Promise<VaultBinding | null> {
     // A vault is bound to a space on a server. The app on this device has
     // no binding to ask about, which is the same answer an old server gives.
-    if (this.onDevice) { this.captureOn = false; return null; }
+    if (this.offServer) { this.captureOn = false; this.vaultBound = false; return null; }
     const res = await requestUrl({ url: this.vaultUrl(), headers: this.headers, throw: false });
     if (res.status === 404) {
       this.captureOn = false;
+      this.vaultBound = false;
       return null;
     }
     if (res.status >= 400) throw new Error(res.json?.message ?? `status ${res.status}`);
     const b = res.json as VaultBinding;
     this.captureOn = !!(b.bound && b.inbox);
+    this.vaultBound = !!b.bound;
+    this.vaultAllSpaces = !!(b.bound && b.allSpaces);
     return b;
   }
 
   /** Bind this vault to a space, or unbind it (null). Says what happened,
    *  including an inbox the new wall no longer holds. */
-  async bindVault(rootSpaceId: string | null): Promise<VaultBinding | null> {
+  async bindVault(rootSpaceId: string | null, allSpaces?: boolean): Promise<VaultBinding | null> {
     if (this.needsServer('Binding a vault to a space')) return null;
     const res = rootSpaceId
       ? await requestUrl({
           url: this.vaultUrl(), method: 'PUT', contentType: 'application/json',
-          body: JSON.stringify({ rootSpaceId, label: this.app.vault.getName() }),
+          // allSpaces is sent only when it is being changed: a new space for the
+          // vault must not quietly turn the switch off (or on).
+          body: JSON.stringify({
+            rootSpaceId, label: this.app.vault.getName(),
+            ...(allSpaces === undefined ? {} : { allSpaces }),
+          }),
           headers: this.headers, throw: false,
         })
       : await requestUrl({ url: this.vaultUrl(), method: 'DELETE', headers: this.headers, throw: false });
@@ -3253,6 +3487,8 @@ export default class GraphitePlugin extends Plugin {
     }
     const b = res.json as VaultBinding;
     this.captureOn = !!(b.bound && b.inbox);
+    this.vaultBound = !!b.bound;
+    this.vaultAllSpaces = !!(b.bound && b.allSpaces);
     if (b.inboxCleared) {
       new Notice('Graphite: the capture inbox was outside the new space, so it was cleared. '
         + 'Pick a new one before capturing.', 12000);
@@ -3260,12 +3496,49 @@ export default class GraphitePlugin extends Plugin {
     return b;
   }
 
+  /** Whether the vault's binding says it may write back to every space the
+   *  account may write in. Read with the binding. */
+  vaultAllSpaces = false;
+
+  /** 0.6.2 · ALL MY SPACES (Omar, 2026-11-17, "All, opt-in switch"). Turns the
+   *  vault's wall from "the space it is bound to and what is nested in it"
+   *  into "any space this account may write in"; the server's permissions
+   *  still decide each write. Off by default, and the switch lives on the
+   *  vault's binding on the server, so it needs a bound vault - the bound
+   *  space stays where new spaces, captured lines and pages are put. Answers
+   *  whether the server now holds what was asked. */
+  async setAllSpaces(on: boolean): Promise<boolean> {
+    if (this.needsServer('Writing back to every space')) return false;
+    const b = await this.fetchBinding().catch(() => null);
+    if (!b?.bound || !b.root) {
+      new Notice('Graphite: choose this vault\'s space first. "All my spaces" is a choice on a '
+        + 'bound vault, and that space is where new spaces and captured lines go.', 12000);
+      return false;
+    }
+    const done = await this.bindVault(b.root.id, on);
+    return !!done && !!done.allSpaces === on;
+  }
+
   /** The Tasks modules the server would accept as this vault's inbox. */
   async fetchInboxChoices(): Promise<Array<{ id: string; label: string }>> {
-    if (this.onDevice) return [];
+    if (this.offServer) return [];
     const res = await requestUrl({ url: this.vaultUrl('/inboxes'), headers: this.headers, throw: false });
     if (res.status >= 400) return [];
     return res.json as Array<{ id: string; label: string }>;
+  }
+
+  /** The Notes modules a page folder may be filed in: the server's list, the
+   *  ones the page door would accept. Empty when there is nothing to choose
+   *  from - not bound, offline, an older server - and the default still works. */
+  async fetchPageModuleChoices(): Promise<Array<{ id: string; label: string }>> {
+    if (this.offServer) return [];
+    try {
+      const res = await requestUrl({ url: this.vaultUrl('/page-modules'), headers: this.headers, throw: false });
+      if (res.status >= 400) return [];
+      return res.json as Array<{ id: string; label: string }>;
+    } catch {
+      return [];
+    }
   }
 
   /** Choose (or clear) the capture inbox. */
@@ -3282,6 +3555,84 @@ export default class GraphitePlugin extends Plugin {
     }
     this.captureOn = !!moduleId;
     return true;
+  }
+
+  /** Set while a whole-account pull runs: each space's own "pulled" line gives
+   *  way to the one summary, so ten spaces are one notice and not ten. Notes
+   *  that were banked or let go still say so. */
+  private quietPulls = 0;
+  private mirroring = false;
+
+  /** 0.6.1 · LINKING IS ENOUGH. Pulls every space the key can read - the ones
+   *  the person owns and the ones shared with them, which is what
+   *  `GET /spaces` lists - into this vault, in the vault's layout.
+   *
+   *  `loud` is the person asking (the command, the settings button): it brings
+   *  in every space with no file here, offered before or not. Quiet is the
+   *  check that runs when Obsidian opens and when a key is tested: it brings
+   *  in the spaces this vault has not been offered, and only while
+   *  `mirrorAll` is on. A space is marked offered however its pull went, so a
+   *  refusal is said once and not retried at every check; the command is how
+   *  it is tried again.
+   *
+   *  The server's per-space "kept as .md files on the server" switch is a
+   *  different thing (the server writing a folder of its own) and is neither
+   *  read nor changed here: export.md and export.folder answer for any space
+   *  the key can read. */
+  async mirrorEverySpace(loud: boolean): Promise<number> {
+    if (this.offServer || !this.configured) return 0;
+    if (!loud && !this.settings.mirrorAll) return 0;
+    // One run at a time. A check that fired the quiet run a moment ago is
+    // finished before the person's own ask goes on; a second quiet one is
+    // simply not needed.
+    if (this.mirroring && !loud) return 0;
+    while (this.mirroring) await new Promise((r) => window.setTimeout(r, 50));
+    this.mirroring = true;
+    let brought = 0;
+    const failed: string[] = [];
+    try {
+      let spaces: SpaceInfo[];
+      try {
+        spaces = await this.fetchSpaces();
+      } catch (e) {
+        if (loud) new Notice(`Graphite: could not list your spaces - ${e}`);
+        return 0;
+      }
+      const seen = new Set(this.settings.spacesSeen);
+      const todo = spaces.filter((sp) =>
+        this.entriesForSpace(sp.id).length === 0 && (loud || !seen.has(sp.id)));
+      this.quietPulls++;
+      try {
+        for (const sp of todo) {
+          await this.pullSpace(sp);
+          if (this.entriesForSpace(sp.id).length > 0) brought++; else failed.push(sp.name);
+        }
+      } finally {
+        this.quietPulls--;
+      }
+      const next = new Set([...seen, ...spaces.map((sp) => sp.id)]);
+      if (next.size !== seen.size) {
+        this.settings.spacesSeen = [...next];
+        await this.saveSettings();
+      }
+      if (brought) {
+        // READING IS ALL A KEY DOES. What a vault writes back is walled to the
+        // space it is bound to (vault-wall.ts: an unbound vault writes
+        // nowhere), so a vault nobody has bound says so here, once, rather
+        // than letting the first edit find out.
+        await this.fetchBinding().catch(() => null);
+        new Notice(`Graphite: brought in ${brought} space${brought === 1 ? '' : 's'} from your account.`
+          + (this.vaultBound ? '' : ' Edits go back to Graphite once you choose this vault\'s space in the plugin settings.'), 12000);
+      } else if (loud && !failed.length) {
+        new Notice(todo.length ? 'Graphite: nothing new to bring in.' : 'Graphite: every space you can read is already in this vault.');
+      }
+      if (failed.length) {
+        new Notice(`Graphite: could not bring in ${failed.join(', ')}. "Bring in every space" tries again.`, 12000);
+      }
+    } finally {
+      this.mirroring = false;
+    }
+    return brought;
   }
 
   async fetchSpaces(): Promise<SpaceInfo[]> {
@@ -3306,7 +3657,7 @@ export default class GraphitePlugin extends Plugin {
 
   /** Optional flow: selective modules, always into the current vault. */
   async chooseAndPullSelective() {
-    // The app on this device exports a whole space; a subset of its
+    // The app on this device or computer exports a whole space; a subset of its
     // modules is the exporter of a server.
     if (this.needsServer('Choosing modules to pull')) return;
     if (!(await this.checkConnection(false))) {
@@ -3411,8 +3762,14 @@ export default class GraphitePlugin extends Plugin {
       const dataPath = p.join(plugDir, 'data.json');
       let data: any = {};
       try { data = JSON.parse(fs.readFileSync(dataPath, 'utf8')); } catch { /* fresh */ }
-      if (!data.serverUrl) data.serverUrl = this.settings.serverUrl;
-      if (!data.token) data.token = this.settings.token;
+      if (this.onComputer) {
+        // The other vault finds the app on this computer itself: there is
+        // no address or key of ours to hand it.
+        if (!data.serverUrl && !data.token) data.source = 'computer';
+      } else {
+        if (!data.serverUrl) data.serverUrl = this.settings.serverUrl;
+        if (!data.token) data.token = this.settings.token;
+      }
       data.files = data.files ?? {};
 
       // R-1512: THE DESTINATION VAULT'S OWN LAYOUT DECIDES THE SHAPE, and
@@ -3449,20 +3806,24 @@ export default class GraphitePlugin extends Plugin {
 
       let note: string;
       if (layout === 'folder') {
-        const res = await requestUrl({
-          url: this.folderUrl(space.id), headers: this.headers,
-        });
-        const out = res.json as { folder: string; files: ExportedFile[] };
+        // FINDING 119: the same rule as a pull here — a folder another space
+        // already syncs into in THAT vault is not shared.
+        const got = await this.folderExport(
+          data.files, space, undefined,
+          (Object.values(data.files) as FileEntry[]).find((e) => e.spaceId === space.id)?.folderAsked);
+        if (!got) return;
+        const { out, asked } = got;
         fs.mkdirSync(p.join(dest.path, out.folder), { recursive: true });
         for (const f of out.files) {
           stamp(f.path, writeNote(f.path, f.markdown), {
-            folder: out.folder, role: f.kind, moduleId: f.moduleId,
+            folder: out.folder, ...(asked ? { folderAsked: asked } : {}),
+            role: f.kind, moduleId: f.moduleId,
           });
         }
         note = `pulled "${space.name}" into vault "${dest.name}" as a folder of ${out.files.length} notes`;
       } else {
         const md = await requestUrl({ url: this.exportUrl(space.id), headers: this.headers });
-        const fileName = `${space.name.replace(/[\\/:*?"<>|]/g, '_')}.md`;
+        const fileName = singleFileFor(data.files, space);
         stamp(fileName, writeNote(fileName, md.text), {});
         note = `pulled "${space.name}" into vault "${dest.name}"`;
       }
@@ -3501,9 +3862,45 @@ export default class GraphitePlugin extends Plugin {
 
   /** R-379: the folder-layout twin of exportUrl — index + one note per
    *  module, as JSON with vault-relative paths. */
-  private folderUrl(spaceId: string, moduleIds?: string[]) {
-    const q = moduleIds?.length ? `?modules=${moduleIds.join(',')}` : '';
-    return this.api(`/spaces/${spaceId}/export.folder${q}`);
+  private folderUrl(spaceId: string, moduleIds?: string[], folder?: string) {
+    const q = [
+      moduleIds?.length ? `modules=${moduleIds.join(',')}` : '',
+      // FINDING 119: the folder this space was given when its own name was
+      // already another space's.
+      folder ? `folder=${encodeURIComponent(folder)}` : '',
+    ].filter(Boolean).join('&');
+    return this.api(`/spaces/${spaceId}/export.folder${q ? `?${q}` : ''}`);
+  }
+
+  /** FINDING 119: ONE SPACE, ONE FOLDER. The server names a space's folder
+   *  from the space's name, and two spaces may share a name ("Home" twice, a
+   *  household and a trip). Both landed in `Home/`: the second pull wrote over
+   *  the first space's notes and re-pointed their tracked paths at itself, so
+   *  the first could never be pushed back. The folder a space already has is
+   *  asked for again by name; a space new to the vault whose default folder
+   *  another space holds asks for its own, `Home (<end of its id>)`; and a
+   *  server that does not honour the ask is refused, never shared. Returns
+   *  the export to write, or null (said) when there is no free folder. */
+  private async folderExport(
+    files: Record<string, FileEntry>, space: SpaceInfo, moduleIds: string[] | undefined,
+    own: string | undefined,
+  ): Promise<{ out: { folder: string; files: ExportedFile[] }; asked?: string } | null> {
+    const ask = async (folder?: string) => (await requestUrl({
+      url: this.folderUrl(space.id, moduleIds, folder), headers: this.headers,
+    })).json as { folder: string; files: ExportedFile[] };
+    let out = await ask(own);
+    let asked = own;
+    if (!own && folderHeldByAnother(files, out.folder, space.id)) {
+      asked = distinctFolder(out.folder, space.id);
+      out = await ask(asked);
+    }
+    if (folderHeldByAnother(files, out.folder, space.id)) {
+      new Notice(
+        `Graphite: another space in this vault already syncs into "${out.folder}/", so "${space.name}" was not pulled — ` +
+        'it would have written over those notes. Rename one of the two spaces in Graphite, then pull again.', 12000);
+      return null;
+    }
+    return { out, asked };
   }
 
   /** Every tracked file belonging to one space, with its path. */
@@ -3519,7 +3916,7 @@ export default class GraphitePlugin extends Plugin {
     if (this.settings.layout === 'folder') {
       return this.pullFolder(space, moduleIds, moduleCount);
     }
-    const fileName = `${space.name.replace(/[\\/:*?"<>|]/g, '_')}.md`;
+    const fileName = singleFileFor(this.settings.files, space);
     const prev = this.settings.files[fileName];
     const effective = moduleIds === undefined ? prev?.moduleIds
       : moduleIds === null ? undefined : moduleIds;
@@ -3562,7 +3959,7 @@ export default class GraphitePlugin extends Plugin {
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
-      new Notice(`Graphite: pulled "${space.name}"${scope}.`);
+      if (!this.quietPulls) new Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
       new Notice(`Graphite: pull failed — ${e}`);
     }
@@ -3590,10 +3987,10 @@ export default class GraphitePlugin extends Plugin {
     const effective = moduleIds === undefined ? stored
       : moduleIds === null ? undefined : moduleIds;
     try {
-      const res = await requestUrl({
-        url: this.folderUrl(space.id, effective), headers: this.headers,
-      });
-      const out = res.json as { folder: string; files: ExportedFile[] };
+      const got = await this.folderExport(
+        this.settings.files, space, effective, previous.find((p) => p.entry.folderAsked)?.entry.folderAsked);
+      if (!got) return;
+      const { out, asked } = got;
       const written = new Set<string>();
       // Paths that MOVED rather than went away — a renamed note must not be
       // reported as one the space no longer syncs.
@@ -3605,12 +4002,19 @@ export default class GraphitePlugin extends Plugin {
       try {
         await this.ensureFolder(out.folder);
         for (const f of out.files) {
+          // R-8336: a page lives in a folder of its notebook and section, which
+          // may not exist yet (or not any more, after a move).
+          await this.ensureDirs(f.path);
           // The same note under its old name, if the module or the space was
-          // renamed since the last pull.
+          // renamed since the last pull. A PAGE is the same page by its note id
+          // (it moves when its title or section changed in Graphite) - it must
+          // never be taken for the index or for its notebook's own note.
           const was = previous.find((p) => p.path !== f.path && (
-            f.kind === 'module'
-              ? p.entry.moduleId === f.moduleId
-              : p.entry.role === 'index'));
+            f.kind === 'page'
+              ? p.entry.role === 'page' && p.entry.noteId === f.noteId
+              : f.kind === 'module'
+                ? p.entry.role !== 'page' && p.entry.moduleId === f.moduleId
+                : p.entry.role === 'index'));
           if (was) {
             await this.renameTo(was.path, f.path);
             renamed.add(was.path);
@@ -3627,7 +4031,10 @@ export default class GraphitePlugin extends Plugin {
           else await this.app.vault.create(f.path, text);
           this.settings.files[f.path] = {
             spaceId: space.id, spaceName: space.name, folder: out.folder,
+            ...(asked ? { folderAsked: asked } : {}),
             role: f.kind, moduleId: f.moduleId,
+            ...(f.kind === 'page'
+              ? { noteId: f.noteId, pageDir: notebookDirOf(f.path, f.markdown) } : {}),
             lastSyncAt: Date.now(), lastHash: hash(text),
             moduleIds: effective,
             moduleCount: moduleCount ?? previous[0]?.entry.moduleCount,
@@ -3641,15 +4048,47 @@ export default class GraphitePlugin extends Plugin {
       // Anything this space used to sync and no longer does: let go of it.
       // A note that was RENAMED is not one of them — it is the same note under
       // the name the app now gives it.
-      const dropped = previous.filter((p) => !written.has(p.path) && !renamed.has(p.path));
-      for (const d of dropped) {
+      const gone = previous.filter((p) => !written.has(p.path) && !renamed.has(p.path));
+      // R-8336: A PAGE THAT IS GONE FROM GRAPHITE TAKES ITS FILE WITH IT - when
+      // the file is still exactly what the last sync wrote (nothing of the
+      // person's is in it, and Graphite has the page in its Bin), and when the
+      // page's notebook is still in scope (a narrowed selection leaves a page
+      // out without deleting it). The file goes to the trash the vault
+      // is set to use, so it can be put back from there. A file the person
+      // changed is theirs: it is let go of, left, and said, as a module note is.
+      const trashed: string[] = [];
+      const dropped: typeof gone = [];
+      this.writingBack++;
+      try {
+        for (const d of gone) {
+          const f = d.entry.role === 'page' ? this.app.vault.getAbstractFileByPath(d.path) : null;
+          const inScope = !effective?.length || (d.entry.moduleId !== undefined && effective.includes(d.entry.moduleId));
+          if (f instanceof TFile && inScope && hash(await this.app.vault.read(f)) === d.entry.lastHash) {
+            try {
+              await this.trashFile(f);
+              trashed.push(d.path);
+              continue;
+            } catch { /* could not trash it: fall through and leave it, said below */ }
+          }
+          dropped.push(d);
+        }
+      } finally {
+        this.writingBack--;
+      }
+      for (const d of gone) {
         delete this.settings.files[d.path];
         delete this.settings.bases[d.path];
       }
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
-      new Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ — ${out.files.length} note${out.files.length === 1 ? '' : 's'}.`);
+      if (!this.quietPulls) new Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ — ${out.files.length} note${out.files.length === 1 ? '' : 's'}.`);
+      if (trashed.length) {
+        new Notice(
+          `Graphite: ${trashed.length} page${trashed.length === 1 ? ' was' : 's were'} removed in Graphite, ` +
+          `so ${trashed.length === 1 ? 'its file was' : 'their files were'} moved to the trash: ` +
+          `${trashed.join(', ')}. Graphite keeps ${trashed.length === 1 ? 'it' : 'them'} in its Bin.`, 12000);
+      }
       if (dropped.length) {
         new Notice(
           `Graphite: ${dropped.length} note${dropped.length === 1 ? '' : 's'} ` +
@@ -3667,6 +4106,129 @@ export default class GraphitePlugin extends Plugin {
     } catch (e) {
       new Notice(`Graphite: pull failed — ${e}`);
     }
+  }
+
+  /** Obsidian's own trash, as the vault is set to use it (the file manager's),
+   *  or the vault's .trash on an Obsidian that has no such call. */
+  private async trashFile(file: TFile) {
+    const fm = this.app.fileManager as { trashFile?: (f: TFile) => Promise<void> };
+    if (typeof fm.trashFile === 'function') await fm.trashFile(file);
+    else await this.app.vault.trash(file, false);
+  }
+
+  /** Page files deleted in this burst, by path. */
+  private vanished = new Set<string>();
+  private vanishTimer = 0;
+
+  /** This many page files gone at once is not a person deleting pages: it is a
+   *  folder moved, a sync client part-way through, or a drive not mounted. */
+  static readonly MASS_DELETE = 5;
+
+  /** R-8336: A PAGE'S FILE WAS DELETED. With auto-push on, the page is deleted
+   *  in Graphite a moment later (its Bin keeps it); with it off, the panel
+   *  shows the file missing and offers Delete page. Gathered over a second and
+   *  a half so a burst can be judged as a burst. */
+  private pageVanished(path: string) {
+    this.vanished.add(path);
+    window.clearTimeout(this.vanishTimer);
+    this.vanishTimer = window.setTimeout(() => {
+      const paths = [...this.vanished];
+      this.vanished.clear();
+      if (paths.length >= GraphitePlugin.MASS_DELETE) {
+        new Notice(
+          `Graphite: ${paths.length} page files disappeared at once, so none were deleted in Graphite. ` +
+          'Pull to put them back, or delete the pages you mean in the sync panel.', 12000);
+        return;
+      }
+      if (this.settings.autoPush) for (const p of paths) void this.pushFile(p, { auto: true });
+      this.refreshPanel();
+    }, 1500);
+  }
+
+  /** The deletion a missing page file stands for: the app's ordinary delete,
+   *  not forced, so a page other things link to is refused by the same rule the
+   *  app keeps and its file comes back on the next Pull. */
+  private async deleteGonePage(path: string, entry: FileEntry, opts?: { auto?: boolean }) {
+    if (!entry.moduleId || !entry.noteId) return;
+    if (!(await this.writeAllowed('deleted', !opts?.auto))) return;
+    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
+    const title = path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/i, '');
+    // A RENAME THE PLUGIN DID NOT SEE (a sync client moved it) is not a
+    // deletion: when another file under the notebook's folder says it is this
+    // page, the tracking follows that file.
+    const dir = entry.pageDir ?? '';
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (!dir || !f.path.startsWith(`${dir}/`) || this.settings.files[f.path]) continue;
+      if (pageIdOf(await this.app.vault.read(f)) === entry.noteId) {
+        await this.pageRenamed(path, f.path);
+        return;
+      }
+    }
+    const res = await requestUrl({
+      url: this.api(`/modules/${entry.moduleId}/notes/${entry.noteId}`),
+      method: 'DELETE', headers: this.headers, throw: false,
+    });
+    if (this.onComputer) this.computerReadOnly = res.status === 403;
+    if (res.status < 300 || res.status === 404) {
+      delete this.settings.files[path];
+      delete this.settings.bases[path];
+      await this.saveSettings();
+      this.refreshPanel();
+      new Notice(res.status === 404
+        ? `Graphite: "${title}" was already gone from Graphite.`
+        : `Graphite: deleted "${title}" in Graphite - it is in the Bin there.`);
+    } else if (res.status === 409) {
+      new Notice(
+        `Graphite: "${title}" is linked from other things, so it stays in Graphite. ` +
+        'Pull to put its file back, or erase it in the app if you mean it.', 12000);
+    } else {
+      new Notice(`Graphite: could not delete "${title}" (${res.status}) - ${res.json?.message ?? 'see the app'}. Nothing was changed.`, 12000);
+    }
+  }
+
+  /** Every folder on the way to [path], outermost first (R-8336: a page sits two
+   *  or three folders deep, and createFolder makes one level). */
+  private async ensureDirs(path: string) {
+    let at = '';
+    for (const part of path.split('/').slice(0, -1)) {
+      at = at ? `${at}/${part}` : part;
+      await this.ensureFolder(at);
+    }
+  }
+
+  /** R-8336: A PAGE'S FILE WAS RENAMED OR MOVED IN THE VAULT. The file name is
+   *  the page's title and its folder is its section, so this is the person
+   *  renaming the page or moving it between sections: the two lines of the
+   *  file that say so are rewritten to match, the tracking follows the file
+   *  (it would otherwise be left pointing at a path nothing is at), and the
+   *  page is pushed like any edit. Obsidian has already rewritten the links to
+   *  it in the vault's other files; Graphite rewrites its own on the title
+   *  change. Not the plugin's own renames (a pull moving a page that was
+   *  renamed in Graphite), which come through with writingBack up. */
+  private async pageRenamed(from: string, to: string) {
+    const entry = this.settings.files[from];
+    if (!entry || entry.role !== 'page' || this.settings.files[to]) return;
+    const file = this.app.vault.getAbstractFileByPath(to);
+    if (!(file instanceof TFile) || file.extension !== 'md') return;
+    const text = await this.app.vault.read(file);
+    // Only the file that is still that page: a different file moved onto the
+    // path, or the frontmatter edited into something else, is left alone.
+    if (pageIdOf(text) !== entry.noteId) return;
+    this.settings.files[to] = { ...entry };
+    delete this.settings.files[from];
+    const base = this.settings.bases[from];
+    delete this.settings.bases[from];
+    if (base !== undefined) putBase(this.settings.bases, to, base);
+    const change = pageRenameOf(from, to, entry.pageDir ?? '');
+    if (change) {
+      this.writingBack++;
+      try {
+        await this.app.vault.process(file, (cur) => setPageFields(cur, change));
+      } finally { this.writingBack--; }
+      if (this.settings.autoPush) this.schedulePush(to);
+    }
+    await this.saveSettings();
+    this.refreshPanel();
   }
 
   private async ensureFolder(folder: string) {
@@ -3698,15 +4260,56 @@ export default class GraphitePlugin extends Plugin {
     await this.pushFile(file.path);
   }
 
+  /** An auto-push of [path] about 2.5 seconds after the last edit. */
+  private schedulePush(path: string) {
+    window.clearTimeout(this.pushTimers[path]);
+    this.pushTimers[path] = window.setTimeout(
+      () => void this.pushFile(path, { auto: true }), 2500);
+  }
+
+  /** FINDING 120: ONE PUSH PER NOTE AT A TIME. Every way into a push comes
+   *  through here (the command, the panel button, the sweep, the auto-push
+   *  timer, the conflict dialog), so the guard sits on the door and not on
+   *  each caller. A push asked for while one is running is not dropped — the
+   *  edits it was asked about may have come after the first read the file —
+   *  it runs once more when the first is done. */
   async pushFile(path: string, opts?: { auto?: boolean; force?: boolean }) {
+    if (this.pushing.has(path)) {
+      this.pushAgain.set(path, opts);
+      return;
+    }
+    this.pushing.set(path, true);
+    try {
+      await this.pushFileNow(path, opts);
+    } finally {
+      this.pushing.delete(path);
+    }
+    if (this.pushAgain.has(path)) {
+      const again = this.pushAgain.get(path);
+      this.pushAgain.delete(path);
+      await this.pushFile(path, again);
+    }
+  }
+
+  private async pushFileNow(path: string, opts?: { auto?: boolean; force?: boolean }) {
     // On a device a changed note is not pushed anywhere: the app takes it in
     // the next time it is opened, and the panel says so.
     if (this.onDevice) return;
     const entry = this.settings.files[path];
     const file = this.app.vault.getAbstractFileByPath(path);
+    // R-8336: THE FILE OF A PAGE IS GONE, so there is nothing to push: the
+    // push is the deletion. Explicit (the panel's Delete page), or by itself
+    // when auto-push is on.
+    if (entry?.role === 'page' && !(file instanceof TFile)) {
+      await this.deleteGonePage(path, entry, opts);
+      return;
+    }
     if (!entry || !(file instanceof TFile)) return;
     // REGISTER 1527: an out-of-date plugin does not push.
     if (!(await this.writeAllowed('pushed', !opts?.auto))) return;
+    // The app on this computer said it lets notes apps read and not change:
+    // an automatic push stays quiet instead of saying so on every edit.
+    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
     // ── R-399: a push may not silently rewrite app-side edits ──────────────
     //
     // update_existing patches every field whose VALUE differs — recency is
@@ -3802,10 +4405,13 @@ export default class GraphitePlugin extends Plugin {
       });
       let res = await send('update_existing');
       let addOnly = false;
-      if (res.status === 403) {
+      // A refusal from the app on this computer is its read-only switch, not
+      // a role, so the add-only retry is for the refusal of a server alone.
+      if (res.status === 403 && !this.onComputer) {
         res = await send('merge');
         addOnly = res.status < 400;
       }
+      if (this.onComputer) this.computerReadOnly = res.status === 403;
       if (res.status >= 400) {
         new Notice(`Graphite: push refused (${res.status}) — ${res.json?.message ?? 'see the app'}. Nothing was changed.`);
         return;
@@ -3851,9 +4457,35 @@ export default class GraphitePlugin extends Plugin {
         return;
       }
       const text = keepFreeform(markdown, fresh);
+      // ── FINDING 117: THE CANONICAL TEXT GOES BACK ONLY OVER WHAT WAS SENT ──
+      //
+      // The file was read once, before the request, and written after it
+      // without a second look — and the write is silenced (writingBack), so
+      // nothing scheduled a new push. Whatever was typed in the seconds the
+      // round trip took was overwritten and nothing ever said so. The check
+      // and the write are ONE step now (vault.process runs on the file as it
+      // is at that moment): a file that still holds exactly what was pushed
+      // takes the canonical text; one that moved on keeps its edit, with the
+      // canonical text merged in where the two touched different lines (the
+      // ids the server gave a new section must reach the file, or the next
+      // push makes it again), and the edit is pushed on its own turn.
+      let kept = false;
       this.writingBack++;
-      try { await this.app.vault.modify(file, text); } finally { this.writingBack--; }
+      try {
+        await this.app.vault.process(file, (current) => {
+          if (current === markdown || current === text) return text;
+          kept = true;
+          const merged = mergeLines(markdown, current, text, { adjacent: true });
+          // Typed on the very line the server changed: the words stay the
+          // person's, and the id the server gave that line is carried onto
+          // them, so the next push updates the task instead of making it again.
+          return merged.clean ? merged.text : carryIds(markdown, current, text);
+        });
+      } finally { this.writingBack--; }
       entry.lastSyncAt = Date.now();
+      // The hash and the base name what the SERVER holds, written or not:
+      // a file that kept its edit then reads as having local edits, which
+      // is true, and the next push sends the right base.
       entry.lastHash = hash(text);
       // ROW 2514: the text just written IS what the server last wrote, so it
       // is the base for the next push. A field held keeps the app value in
@@ -3861,7 +4493,14 @@ export default class GraphitePlugin extends Plugin {
       putBase(this.settings.bases, path, text);
       await this.saveSettings();
       this.refreshPanel();
-      new Notice(`Graphite: pushed "${entry.spaceName ?? path}" and canonicalized.`);
+      if (kept) {
+        if (this.settings.autoPush) this.schedulePush(path);
+        new Notice(
+          `Graphite: pushed "${entry.spaceName ?? path}". You kept typing while it was pushed, so your note ` +
+          `was left as you have it${this.settings.autoPush ? ' and will be pushed again' : ' — push again to send the newer edits'}.`);
+      } else {
+        new Notice(`Graphite: pushed "${entry.spaceName ?? path}" and canonicalized.`);
+      }
     } catch (e) {
       new Notice(`Graphite: push failed — ${e}`);
     }
@@ -3889,12 +4528,16 @@ export default class GraphitePlugin extends Plugin {
     // is picked out of the answer by its module id below.
     const scope = entry.moduleIds;
     const res = await requestUrl({
-      url: this.folderUrl(entry.spaceId, scope), headers: this.headers,
+      url: this.folderUrl(entry.spaceId, scope, entry.folderAsked), headers: this.headers,
     });
     const out = res.json as { folder: string; files: ExportedFile[] };
+    // R-8336: pages share their notebook's module id, so the module id alone
+    // would answer a page with its notebook's note (or the other way about).
     const match = entry.role === 'index'
       ? out.files.find((f) => f.kind === 'index')
-      : out.files.find((f) => f.moduleId === entry.moduleId);
+      : entry.role === 'page'
+        ? out.files.find((f) => f.kind === 'page' && f.noteId === entry.noteId)
+        : out.files.find((f) => f.kind !== 'page' && f.moduleId === entry.moduleId);
     return match?.markdown ?? null;
   }
 
@@ -3945,17 +4588,38 @@ export default class GraphitePlugin extends Plugin {
   /** R-399: never destroy vault writing. Before the canonical text replaces
    *  a both-moved note, the user's version is copied BESIDE it — an ordinary
    *  untracked file the user merges from and deletes when done. Banking is
-   *  the floor, not the ceremony: the pull itself stays one action. */
+   *  the floor, not the ceremony: the pull itself stays one action.
+   *
+   *  FINDING 118: THE NAME NEVER STANDS FOR TWO VERSIONS, AND A FAILURE IS NOT
+   *  "ALREADY BANKED". The copy was named to the minute and every create error
+   *  was read as "this exact version is already there", so a second, different
+   *  version in the same minute was not written, the pull overwrote the note,
+   *  and the notice still named the first copy. A name that is taken holds
+   *  this very text (then it is the copy) or another version (then the next
+   *  numbered name is tried, the way note sync names its own conflict copies);
+   *  a create that fails for any other reason throws, so the pull stops
+   *  before it overwrites the note. */
   private async bankConflictCopy(path: string, old: string): Promise<string> {
-    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', 'h');
-    const dot = path.toLowerCase().lastIndexOf('.md');
-    const bankPath = dot === -1
-      ? `${path} (conflict ${stamp}).md`
-      : `${path.slice(0, dot)} (conflict ${stamp}).md`;
-    try {
-      await this.app.vault.create(bankPath, old);
-    } catch { /* same-minute re-pull already banked this exact version */ }
-    return bankPath;
+    const skip = new Set<string>();
+    for (let tries = 0; tries < 100; tries++) {
+      const bankPath = conflictCopyPath(path, new Date(), (p) => skip.has(p));
+      const there = this.app.vault.getAbstractFileByPath(bankPath);
+      if (there instanceof TFile) {
+        if ((await this.app.vault.read(there)) === old) return bankPath;
+        skip.add(bankPath);
+        continue;
+      }
+      try {
+        await this.app.vault.create(bankPath, old);
+        return bankPath;
+      } catch (e) {
+        // Raced with a writer that made the name between the look and the
+        // create: look again. Anything else is the copy NOT having been made.
+        if (this.app.vault.getAbstractFileByPath(bankPath)) continue;
+        throw new Error(`could not keep a copy of "${path}" beside it (${e}) — nothing was overwritten`);
+      }
+    }
+    throw new Error(`could not find a free name for a copy of "${path}" — nothing was overwritten`);
   }
 
   /** R-379: push every note of a space, index last — the index carries no
@@ -4043,6 +4707,27 @@ export default class GraphitePlugin extends Plugin {
     this.settings = { ...DEFAULTS, ...data };
     this.settings.routeCache = Array.isArray(data.routeCache) ? data.routeCache : [];
     this.settings.routeRecent = Array.isArray(data.routeRecent) ? data.routeRecent : [];
+    this.settings.spacesSeen = Array.isArray(data.spacesSeen)
+      ? data.spacesSeen.filter((x: unknown) => typeof x === 'string') : [];
+    // A vault that already has spaces pulled by hand chose them; bringing in
+    // the rest unasked would be a surprise. An explicit choice either way
+    // is never overridden.
+    if (typeof data.mirrorAll !== 'boolean') {
+      this.settings.mirrorAll = Object.keys(this.settings.files ?? {}).length === 0;
+    }
+    // NOTE PAGES: a state of its own, never the one object DEFAULTS holds.
+    this.settings.pageModules = {};
+    if (data.pageModules && typeof data.pageModules === 'object') {
+      for (const [k, v] of Object.entries(data.pageModules)) {
+        if (typeof v === 'string' && v) this.settings.pageModules[k] = v;
+      }
+    }
+    // A vault that listed page folders before pages had a switch of their own
+    // was already sending them; naming the folders was its consent. An
+    // explicit choice, either way, is never overridden.
+    if (typeof data.pagesOn !== 'boolean') {
+      this.settings.pagesOn = parseFolders(String(data.pageFolders ?? '')).length > 0;
+    }
     // ROW 2514: the bases are a store of their own — a copy, text only, and
     // only for notes still tracked (a base for a path nothing syncs any
     // more would be sent for a note that is not that one).
@@ -4309,6 +4994,7 @@ class LpSyncView extends ItemView {
     conn.createEl('div', { text: onDevice ? 'THIS DEVICE' : 'CONNECTION', cls: 'gr-sync-label' });
     const me = this.plugin.lastMe;
     const health = this.plugin.lastHealth;
+    const onComputer = this.plugin.onComputer;
     if (onDevice) {
       // Nothing is connected to: the panel says what the app left in this
       // vault, and what happens to a change made here.
@@ -4331,17 +5017,19 @@ class LpSyncView extends ItemView {
       }
     } else if (!this.plugin.configured) {
       conn.createDiv({
-        text: 'Not configured — set the server URL and API token in the plugin settings.',
+        text: onComputer ? this.plugin.notConfigured().long
+          : 'Not configured — set the server URL and API token in the plugin settings.',
         cls: 'gr-sync-bad',
       });
     } else if (me) {
       conn.createDiv({
-        text: `🟢 Connected as ${me.name ?? me.email} · ${this.plugin.settings.serverUrl}`,
+        text: onComputer ? '🟢 Connected to the Graphite app on this computer'
+          : `🟢 Connected as ${me.name ?? me.email} · ${this.plugin.settings.serverUrl}`,
       });
       // ROW 2376: "connected" is what the last check found, so it says when.
       const when = this.plugin.lastCheck ? ` · checked ${clock(this.plugin.lastCheck.at)}` : '';
       conn.createDiv({
-        text: `Server version ${health?.version ?? 'unknown'}${when}`,
+        text: `${onComputer ? 'Graphite app version' : 'Server version'} ${health?.version ?? 'unknown'}${when}`,
         cls: 'gr-sync-dim',
       });
       // REGISTER 1527: an out-of-date plugin says so where the connection is.
@@ -4367,8 +5055,13 @@ class LpSyncView extends ItemView {
         });
       }
     } else {
-      conn.createDiv({ text: `🔴 Not connected · ${this.plugin.settings.serverUrl}`, cls: 'gr-sync-bad' });
-      conn.createDiv({ text: 'Use Refresh (or fix the token in settings).', cls: 'gr-sync-dim' });
+      if (onComputer) {
+        conn.createDiv({ text: `🔴 ${this.plugin.lastCheck?.detail ?? 'Not connected'} · this computer`, cls: 'gr-sync-bad' });
+        conn.createDiv({ text: 'Use Refresh once the Graphite app is open.', cls: 'gr-sync-dim' });
+      } else {
+        conn.createDiv({ text: `🔴 Not connected · ${this.plugin.settings.serverUrl}`, cls: 'gr-sync-bad' });
+        conn.createDiv({ text: 'Use Refresh (or fix the token in settings).', cls: 'gr-sync-dim' });
+      }
     }
 
     // A device has no pull, no push and no proposals to approve: what is left
@@ -4475,8 +5168,15 @@ class LpSyncView extends ItemView {
             s === 'local-edits' ? '● local edits' : '⚠ file missing');
           stateEl.addClass(`gr-state-${s}`);
         });
-        line.createEl('button', { text: 'Push' })
-          .addEventListener('click', () => void this.plugin.pushFile(path));
+        const pushBtn = line.createEl('button', { text: 'Push' });
+        pushBtn.addEventListener('click', () => void this.plugin.pushFile(path));
+        // R-8336: a page whose file is gone has nothing to push; the same
+        // button is the deletion, and says so.
+        if (entry.role === 'page') {
+          void this.plugin.fileState(path).then((s) => {
+            if (s === 'missing') pushBtn.setText('Delete page');
+          });
+        }
         line.createEl('button', { text: 'Check' })
           .addEventListener('click', () => void this.plugin.serverState(path).then((s) => {
             new Notice(
@@ -4524,9 +5224,14 @@ class LpSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     const onDevice = this.plugin.onDevice;
+    const onComputer = this.plugin.onComputer;
     new Setting(containerEl)
       .setName('Where Graphite is')
-      .setDesc('A server, or the Graphite app on this device. "This device" needs no server and no '
+      .setDesc('A server, or the Graphite app on this device or computer. "This computer" reads the spaces '
+        + 'the app holds, with no server and no account: it needs Obsidian on a desktop and the '
+        + 'Graphite app open on the same computer, with "Let the notes plugin read Graphite on this '
+        + 'computer" turned on in its Settings, Data and server (a phone cannot; use Server). '
+        + '"This device" needs no server and no '
         + 'account: the Graphite app writes your spaces into this vault as notes whenever it is opened, '
         + 'and takes in what you changed here the next time it is opened. Nothing runs in the '
         + 'background, so a change you make here waits for that. In Graphite, choose this vault in '
@@ -4534,10 +5239,17 @@ class LpSettingTab extends PluginSettingTab {
       .addDropdown((d) => d
         .addOption('server', 'Server')
         .addOption('device', 'This device')
+        .addOption('computer', 'This computer')
         .setValue(this.plugin.settings.source)
         .onChange(async (v) => {
-          this.plugin.settings.source = v === 'device' ? 'device' : 'server';
+          if (v === 'computer' && !Platform.isDesktopApp) {
+            new Notice(`Graphite: ${doorSentence('phone')}`, 10000);
+            this.plugin.settings.source = 'server';
+          } else {
+            this.plugin.settings.source = v === 'device' ? 'device' : v === 'computer' ? 'computer' : 'server';
+          }
           await this.plugin.saveSettings();
+          this.plugin.computerReadOnly = false;
           await this.plugin.checkConnection(false);
           this.display();
         }));
@@ -4548,6 +5260,14 @@ class LpSettingTab extends PluginSettingTab {
         .setDesc(look
           ? mirrorSentence(look, Date.now(), Platform.isMobile)
           : 'Looking in this vault for the notes the Graphite app wrote.');
+    } else if (onComputer) {
+      const look = this.plugin.doorLook(true);
+      new Setting(containerEl)
+        .setName('This computer')
+        .setDesc(look.ok
+          ? 'Found the Graphite app on this computer. There is no address or token to enter: '
+            + 'the app leaves them where this plugin reads them, and they change each time the app starts.'
+          : doorSentence(look.why));
     } else {
       new Setting(containerEl)
         .setName('Server URL')
@@ -4574,6 +5294,8 @@ class LpSettingTab extends PluginSettingTab {
       .setName('Connection')
       .setDesc(onDevice
         ? 'Looks in this vault for the notes the Graphite app wrote, and says what changed here since.'
+        : onComputer
+        ? 'Looks for the Graphite app on this computer and asks it who it is.'
         : 'Verifies the URL + token against the server and shows who you are signed in as.')
       .addButton((b) => b.setButtonText(onDevice ? 'Look again' : 'Test connection').setCta().onClick(async () => {
         // MEETING-CAPTURE: the space and inbox lists below were asked of the
@@ -4583,6 +5305,21 @@ class LpSettingTab extends PluginSettingTab {
         // leaves the tab alone, with what was typed still in view.
         if (await this.plugin.checkConnection(true) && !onDevice) this.display();
       }));
+    if (!onDevice && !onComputer) {
+      new Setting(containerEl)
+        .setName('Bring in every space')
+        .setDesc('Once the key is linked, every space you can read is pulled into this vault, and '
+          + 'a space made later arrives the next time Obsidian opens. This only writes files '
+          + 'here. Edits go back to Graphite when you push them (or with Auto-push below), '
+          + 'into the space this vault is bound to.')
+        .addToggle((t) => t.setValue(this.plugin.settings.mirrorAll).onChange(async (v) => {
+          this.plugin.settings.mirrorAll = v;
+          await this.plugin.saveSettings();
+        }))
+        .addButton((b) => b.setButtonText('Bring in now').onClick(async () => {
+          if (await this.plugin.checkConnection(true)) await this.plugin.mirrorEverySpace(true);
+        }));
+    }
     // A pulled space's layout is the choice of a pull, which a device has none of.
     if (!onDevice) {
       // R-379: the vault-shaping choice. Changing it does not touch what is
@@ -4625,13 +5362,13 @@ class LpSettingTab extends PluginSettingTab {
           this.plugin.refreshPanel();
         }));
     }
-    if (onDevice) {
+    if (onDevice || onComputer) {
       // These live on a server: a space the vault is bound to, an inbox, the
-      // lines a capture files, the census. The app on this device has no
+      // lines a capture files, the census. The app on this device or computer has no
       // such server, so there is nothing to choose and one line says why.
       new Setting(containerEl)
         .setName('Capture, binding and census')
-        .setDesc('These need a Graphite server, so they are off while Graphite is read from this device. '
+        .setDesc('These need a Graphite server, so they are off while Graphite is read from this ' + (onComputer ? 'computer' : 'device') + '. '
           + 'Choose Server above to use them.');
     } else {
       // OC2: THE VAULT'S WALL. Omar, 2026-09-22: a vault is "linked to a space
@@ -4648,7 +5385,8 @@ class LpSettingTab extends PluginSettingTab {
         .setName('This vault\'s space')
         .setDesc('Everything this vault writes to Graphite lands in this space or a space '
           + 'nested inside it — or nowhere: a note that names a space outside it is refused, '
-          + 'and the refusal says which. Nothing is written until a space is chosen.')
+          + 'and the refusal says which (unless All my spaces, below, is on). Nothing is written '
+          + 'until a space is chosen. New spaces and captured lines go here.')
         .addDropdown((d) => {
           d.addOption('', 'Not bound — this vault writes nothing');
           d.setValue('');
@@ -4661,6 +5399,21 @@ class LpSettingTab extends PluginSettingTab {
               for (const s of spaces) d.addOption(s.id, s.name);
               d.setValue(b?.bound && b.root ? b.root.id : '');
             }).catch(() => { /* offline: the tab still opens */ });
+        });
+      // 2026-11-17, "All, opt-in switch": the person's own choice to lift the
+      // wall. Off for every vault until turned on, and the server is where it
+      // is held (the binding), so it is read from there.
+      new Setting(containerEl)
+        .setName('All my spaces')
+        .setDesc('Off: this vault writes only into its space and the spaces inside it. On: your '
+          + 'edits go back to every space you are allowed to write in, and Graphite still '
+          + 'checks each one. Needs a space chosen above.')
+        .addToggle((t) => {
+          t.setValue(false);
+          t.onChange(async (v) => {
+            if (!(await this.plugin.setAllSpaces(v))) this.display();
+          });
+          void binding.then((b) => t.setValue(!!(b?.bound && b.allSpaces))).catch(() => undefined);
         });
       // R-1227: THE SETTING THE CAPTURE COMMAND ASKED FOR, AND THAT DID NOT
       // EXIST. Off by default: a command that files tasks into somebody's
@@ -4718,18 +5471,33 @@ class LpSettingTab extends PluginSettingTab {
           this.plugin.settings.autoCapture = v;
           await this.plugin.saveSettings();
         }));
+      // NOTE PAGES: their own switch. Off by default (RU-035). It needs the
+      // vault bound to a space, above; it does not need the capture inbox.
+      new Setting(containerEl)
+        .setName('Send notes to Graphite as pages')
+        .setDesc('Off by default. When on, a note in one of the folders below, or one with a '
+          + 'routing heading (## Weekly >> Space), is sent to Graphite whole a minute after '
+          + 'it stops changing and shown there as a read-only page with the tasks captured '
+          + 'from it. This vault must be bound to a space, above; no capture inbox is needed.')
+        .addToggle((t) => t.setValue(this.plugin.settings.pagesOn).onChange(async (v) => {
+          this.plugin.settings.pagesOn = v;
+          await this.plugin.saveSettings();
+        }));
       new Setting(containerEl)
         .setName('Folders whose notes become pages')
-        .setDesc('Comma-separated, e.g. Meetings. Every note in these folders is sent to '
-          + 'Graphite whole, a minute after it stops changing, and shown there as a page '
-          + 'with the tasks captured from it. Empty by default: nothing is sent. A note '
-          + 'with a routing heading (## Weekly >> Space) is a page whatever this says. '
-          + 'Needs the capture inbox above.')
+        .setDesc('Comma-separated, e.g. Meetings. Every note in these folders is a page, '
+          + 'while the switch above is on. Empty by default. A note with a routing heading '
+          + 'is a page whatever this says. Pick the Notes module for each folder below.')
         .addText((t) => t.setPlaceholder('Meetings').setValue(this.plugin.settings.pageFolders)
           .onChange(async (v) => {
             this.plugin.settings.pageFolders = v;
             await this.plugin.saveSettings();
+            this.drawPageModules();
           }));
+      // One row per listed folder: the Notes module its pages are filed in.
+      this.pageRows = containerEl.createDiv();
+      this.pageModuleList = this.plugin.fetchPageModuleChoices();
+      this.drawPageModules();
       // OC7: the census. Says exactly what leaves, because the switch is the
       // consent and a consent has to name what it covers.
       const sent = this.plugin.censusState;
@@ -4907,9 +5675,12 @@ class LpSettingTab extends PluginSettingTab {
   drawServers(el: HTMLElement) {
     el.empty();
     const list = this.plugin.serversOnThisMachine();
-    if (this.plugin.onDevice) {
-      new Setting(el).setName('Graphite on this device')
-        .setDesc(this.plugin.lastCheck?.detail ?? 'Not looked at yet.')
+    if (this.plugin.offServer) {
+      const here = this.plugin.onComputer;
+      new Setting(el).setName(here ? 'Graphite on this computer' : 'Graphite on this device')
+        .setDesc(here
+          ? `The Graphite app on this computer, no server. ${serverCheckText(this.plugin.lastCheck)}`
+          : this.plugin.lastCheck?.detail ?? 'Not looked at yet.')
         .addButton((b) => b.setButtonText('Check').onClick(async () => {
           await this.plugin.checkConnection(false);
           this.drawServers(el);
@@ -4937,9 +5708,9 @@ class LpSettingTab extends PluginSettingTab {
   drawDevices(el: HTMLElement, phase: 'asking' | 'answered') {
     el.empty();
     const p = this.plugin;
-    if (p.onDevice) {
+    if (p.offServer) {
       new Setting(el).setName('Devices')
-        .setDesc('The Graphite app on this device has no account to sign in to, so there are no sign-ins to list.');
+        .setDesc(`The Graphite app on this ${p.onComputer ? 'computer' : 'device'} has no account to sign in to, so there are no sign-ins to list.`);
       return;
     }
     if (!p.settings.serverUrl || !p.settings.token) {
@@ -4971,6 +5742,46 @@ class LpSettingTab extends PluginSettingTab {
         .setName(`${deviceName(d.userAgent)}${d.current ? ' — this vault\'s token' : ''}`)
         .setDesc(`${lastSeenText(d, now)}${since}`);
     }
+  }
+
+  /** NOTE PAGES: the rows of Notes-module choices, one per listed page folder. */
+  pageRows!: HTMLElement;
+  private pageModuleList: Promise<Array<{ id: string; label: string }>> = Promise.resolve([]);
+  /** Settles when the module choices have been drawn into the rows. */
+  pageModuleChoices: Promise<void> | null = null;
+
+  /** Draw (or redraw) the module row of each listed page folder. The rows draw
+   *  at once with the default, and the choices arrive after, as the capture
+   *  inbox's do, so the tab opens offline. */
+  private drawPageModules() {
+    const rows = this.pageRows;
+    rows.empty();
+    const modules = this.plugin.settings.pageModules;
+    const pending: Array<(list: Array<{ id: string; label: string }>) => void> = [];
+    for (const folder of parseFolders(this.plugin.settings.pageFolders)) {
+      new Setting(rows)
+        .setName(`Notes module for ${folder}`)
+        .setDesc('Where pages from this folder are filed. Pages already sent move when you change it.')
+        .addDropdown((d) => {
+          d.addOption('', 'First Notes module of the space (default)');
+          d.setValue(modules[folder] ?? '');
+          d.onChange(async (v) => {
+            if (v) modules[folder] = v; else delete modules[folder];
+            await this.plugin.saveSettings();
+          });
+          pending.push((list) => {
+            for (const m of list) d.addOption(m.id, m.label);
+            const chosen = modules[folder];
+            if (chosen && !list.some((m) => m.id === chosen)) {
+              d.addOption(chosen, 'A module that is no longer available');
+            }
+            d.setValue(chosen ?? '');
+          });
+        });
+    }
+    this.pageModuleChoices = this.pageModuleList.then((list) => {
+      for (const fill of pending) fill(list);
+    }).catch(() => { /* offline: the rows keep the default */ });
   }
 
   /** The capture inbox's choices, once the server has answered. */

@@ -26,6 +26,7 @@ __export(main_exports, {
   CouchDocSync: () => CouchDocSync,
   CouchError: () => CouchError,
   CouchNoteTransport: () => CouchNoteTransport,
+  DOOR_ENV: () => DOOR_ENV,
   DUE_TIMES: () => DUE_TIMES,
   INLINE_SEAL_MAX: () => INLINE_SEAL_MAX,
   KEPT_OUT: () => KEPT_OUT,
@@ -57,6 +58,7 @@ __export(main_exports, {
   approvedText: () => approvedText,
   asServerSpelling: () => asServerSpelling,
   asTaskLine: () => asTaskLine,
+  baseOf: () => baseOf,
   buildLists: () => buildLists,
   buildRoutes: () => buildRoutes,
   captureCandidates: () => captureCandidates,
@@ -68,11 +70,14 @@ __export(main_exports, {
   default: () => GraphitePlugin,
   destinationOf: () => destinationOf,
   deviceName: () => deviceName,
+  dirOf: () => dirOf,
+  doorFileCandidates: () => doorFileCandidates,
   dueChips: () => dueChips,
   dueValue: () => dueValue,
   emptyNoteSyncState: () => emptyNoteSyncState,
   filterTargets: () => filterTargets,
   finalised: () => finalised,
+  findDoor: () => findDoor,
   fingerprint: () => fingerprint,
   frontmatterFor: () => frontmatterFor,
   groupServers: () => groupServers,
@@ -84,6 +89,7 @@ __export(main_exports, {
   isCaptured: () => isCaptured,
   isMarkerHeaderCell: () => isMarkerHeaderCell,
   isPage: () => isPage,
+  isPageText: () => isPageText,
   isTaskLine: () => isTaskLine,
   isToolbarFile: () => isToolbarFile,
   keepFreeform: () => keepFreeform,
@@ -105,12 +111,19 @@ __export(main_exports, {
   noteLiveBadge: () => noteLiveBadge,
   noteMatches: () => noteMatches,
   noteSpace: () => noteSpace,
+  notebookDirOf: () => notebookDirOf,
   openFile: () => openFile,
   openParams: () => openParams,
+  pageFieldsOf: () => pageFieldsOf,
+  pageIdOf: () => pageIdOf,
+  pageModuleFor: () => pageModuleFor,
+  pageRenameOf: () => pageRenameOf,
   parseFolders: () => parseFolders,
   pickerRoles: () => pickerRoles,
+  priorityChoices: () => priorityChoices,
   proposalLine: () => proposalLine,
   proposalsIn: () => proposalsIn,
+  readDoor: () => readDoor,
   readDue: () => readDue,
   readField: () => readField,
   readHandshake: () => readHandshake,
@@ -124,6 +137,7 @@ __export(main_exports, {
   serverCheckText: () => serverCheckText,
   serverKey: () => serverKey,
   setField: () => setField,
+  setPageFields: () => setPageFields,
   settingsNoteText: () => settingsNoteText,
   shiftMonth: () => shiftMonth,
   splitLines: () => splitLines,
@@ -131,6 +145,7 @@ __export(main_exports, {
   suggestedTarget: () => suggestedTarget,
   targetLabel: () => targetLabel,
   targetToken: () => targetToken,
+  taskModuleOf: () => taskModuleOf,
   tickLines: () => tickLines,
   validTime: () => validTime,
   weekday: () => weekday
@@ -221,7 +236,7 @@ var ANCHORED_IN = {
 var LP_TAIL = /\s*\|\s*(?:gr|lp):\s*([A-Za-z0-9]+)(?:\s+\^[A-Za-z0-9-]+)?\s*$/;
 var PROPOSAL_KEY = /^p_[A-Za-z0-9]{4,24}$/;
 var PROPOSAL_TAIL = /\s*\|\s*(?:gr|lp):\s*(p_[A-Za-z0-9]{4,24})\s*$/;
-var ROUTE_TOKEN = /(^|\s)>>\s*([^#]*?)\s*(?=\s#|$)/;
+var ROUTE_TOKEN = /(^|\s)(?:>>|»|≫|》)\s*([^#]*?)\s*(?=\s#|$)/;
 function readRouteToken(words) {
   const m = ROUTE_TOKEN.exec(words);
   if (!m || m.index === void 0) return { token: null, rest: words };
@@ -236,6 +251,76 @@ function readRouteToken(words) {
 }
 function routeTokenText(space, module2) {
   return module2 ? `>> ${space} / ${module2}` : `>> ${space}`;
+}
+
+// ../../apps/api/src/spaces/tag-hierarchy.ts
+var TAG_SEPARATOR = "/";
+function normaliseTagName(raw2) {
+  return raw2.trim().replace(/^#/, "").split(TAG_SEPARATOR).map((s) => s.trim()).filter((s) => s.length > 0).join(TAG_SEPARATOR);
+}
+
+// ../../apps/api/src/spaces/vault-tags.ts
+var VAULT_TAG = /(^|\s)#([\p{L}\p{N}_/-]+)/gu;
+var HAS_A_LETTER = /[\p{L}_]/u;
+var isTagToken = (slug) => HAS_A_LETTER.test(slug);
+function parseVaultTags(text) {
+  const tags = [];
+  const cleaned = text.replace(VAULT_TAG, (all, pre, slug) => {
+    if (!isTagToken(slug)) return all;
+    tags.push(normaliseTagName(slug));
+    return pre;
+  }).replace(/\s{2,}/g, " ").trim().replace(/\\#([\p{L}\p{N}_/-]+)/gu, (all, slug) => isTagToken(slug) ? "#" + slug : all);
+  return { text: cleaned, tags };
+}
+function frontmatterTags(text) {
+  return frontmatterList(text, "tags")?.values;
+}
+function frontmatterLines(text) {
+  if (!text.trimStart().startsWith("---")) return void 0;
+  const start = text.indexOf("---");
+  const end = text.indexOf("\n---", start + 3);
+  if (end === -1) return void 0;
+  const first = text.slice(0, start).split("\n").length;
+  return { lines: text.slice(start + 3, end).split("\n"), first };
+}
+function frontmatterList(text, key) {
+  const fm = frontmatterLines(text);
+  if (!fm) return void 0;
+  const { lines } = fm;
+  const at = lines.findIndex((l) => l.startsWith(`${key}:`));
+  if (at === -1) return void 0;
+  const line = fm.first + at;
+  const clean = (v) => v.trim().replace(/^["']|["']$/g, "").replace(/^#/, "").trim();
+  const inline = lines[at].slice(key.length + 1).trim();
+  if (inline) {
+    return { values: inline.replace(/^\[|\]$/g, "").split(",").map(clean).filter(Boolean), line };
+  }
+  const out = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    const m = /^\s+-\s*(.*)$/.exec(lines[i]);
+    if (!m) break;
+    const v = clean(m[1]);
+    if (v) out.push(v);
+  }
+  return { values: out, line };
+}
+
+// ../../apps/api/src/spaces/vault-route.ts
+function readHeading(raw2) {
+  const text = raw2.replace(/^\s*#{1,6}\s+/, "");
+  const { token, rest } = readRouteToken(text);
+  const tags = [];
+  const words = rest.replace(VAULT_TAG, (all, pre, slug) => {
+    if (!isTagToken(slug)) return all;
+    tags.push(slug);
+    return pre;
+  }).replace(/\s+/g, " ").trim();
+  return { words, token, tags };
+}
+function sectionNamesModule(section) {
+  if (!section?.trim()) return false;
+  const { token } = readHeading(section);
+  return !!token?.space && !!token.module;
 }
 
 // src/note-lines.ts
@@ -474,58 +559,6 @@ function mergeTick(base, local, remote) {
   return { agreed: remote, line: remote, clash: true };
 }
 
-// ../../apps/api/src/spaces/tag-hierarchy.ts
-var TAG_SEPARATOR = "/";
-function normaliseTagName(raw) {
-  return raw.trim().replace(/^#/, "").split(TAG_SEPARATOR).map((s) => s.trim()).filter((s) => s.length > 0).join(TAG_SEPARATOR);
-}
-
-// ../../apps/api/src/spaces/vault-tags.ts
-var VAULT_TAG = /(^|\s)#([\p{L}\p{N}_/-]+)/gu;
-var HAS_A_LETTER = /[\p{L}_]/u;
-var isTagToken = (slug) => HAS_A_LETTER.test(slug);
-function parseVaultTags(text) {
-  const tags = [];
-  const cleaned = text.replace(VAULT_TAG, (all, pre, slug) => {
-    if (!isTagToken(slug)) return all;
-    tags.push(normaliseTagName(slug));
-    return pre;
-  }).replace(/\s{2,}/g, " ").trim();
-  return { text: cleaned, tags };
-}
-function frontmatterTags(text) {
-  return frontmatterList(text, "tags")?.values;
-}
-function frontmatterLines(text) {
-  if (!text.trimStart().startsWith("---")) return void 0;
-  const start = text.indexOf("---");
-  const end = text.indexOf("\n---", start + 3);
-  if (end === -1) return void 0;
-  const first = text.slice(0, start).split("\n").length;
-  return { lines: text.slice(start + 3, end).split("\n"), first };
-}
-function frontmatterList(text, key) {
-  const fm = frontmatterLines(text);
-  if (!fm) return void 0;
-  const { lines } = fm;
-  const at = lines.findIndex((l) => l.startsWith(`${key}:`));
-  if (at === -1) return void 0;
-  const line = fm.first + at;
-  const clean = (v) => v.trim().replace(/^["']|["']$/g, "").replace(/^#/, "").trim();
-  const inline = lines[at].slice(key.length + 1).trim();
-  if (inline) {
-    return { values: inline.replace(/^\[|\]$/g, "").split(",").map(clean).filter(Boolean), line };
-  }
-  const out = [];
-  for (let i = at + 1; i < lines.length; i++) {
-    const m = /^\s+-\s*(.*)$/.exec(lines[i]);
-    if (!m) break;
-    const v = clean(m[1]);
-    if (v) out.push(v);
-  }
-  return { values: out, line };
-}
-
 // src/census.ts
 var CENSUS_RECENT_DAYS = 7;
 function localDay(ms2) {
@@ -586,12 +619,63 @@ function inCensus(n, today) {
   return age >= 0 && age <= CENSUS_RECENT_DAYS;
 }
 
+// ../../apps/api/src/shared/task-vocabulary.ts
+var BUILT_IN_STATUSES = ["PENDING", "IN_PROGRESS", "DONE", "CANCELLED"];
+var BUILT_IN_PRIORITIES = ["LOW", "NORMAL", "HIGH", "CRITICAL"];
+var DEFAULT_STATUS_NAMES = {
+  PENDING: "Not started",
+  IN_PROGRESS: "In progress",
+  DONE: "Done",
+  CANCELLED: "Cancelled"
+};
+var DEFAULT_PRIORITY_NAMES = {
+  LOW: "Low",
+  NORMAL: "Normal",
+  HIGH: "High",
+  CRITICAL: "Critical"
+};
+function defaultVocabulary() {
+  return {
+    statuses: BUILT_IN_STATUSES.map((s) => ({
+      id: s,
+      name: DEFAULT_STATUS_NAMES[s],
+      colour: null,
+      countsAs: s
+    })),
+    priorities: BUILT_IN_PRIORITIES.map((p) => ({
+      id: p,
+      name: DEFAULT_PRIORITY_NAMES[p],
+      colour: null,
+      countsAs: p
+    }))
+  };
+}
+
 // src/toolbar-lines.ts
 var TASK_LINE = /^(\s*)[-*]\s+\[([ xX-])\]\s?(.*)$/;
 var BULLET = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/;
 var PIPE = /(?<!\\)\|/;
 var MARKER_PART = /^(?:lp|gr)\s*:/i;
 var PRIORITIES = ["low", "normal", "high", "critical"];
+function priorityChoices(words) {
+  const list = words?.priorities ?? [];
+  if (!list.length) {
+    return PRIORITIES.map((p) => ({
+      label: p[0].toUpperCase() + p.slice(1),
+      value: p,
+      hint: p === "normal" ? "default" : void 0
+    }));
+  }
+  return list.map((w) => {
+    const builtIn = DEFAULT_PRIORITY_NAMES[w.countsAs] ?? w.countsAs;
+    const same2 = w.name.toLowerCase() === builtIn.toLowerCase();
+    return {
+      label: w.name,
+      value: w.name.replace(/\|/g, "\\|"),
+      hint: same2 ? w.countsAs === "NORMAL" ? "default" : void 0 : `counts as ${builtIn}`
+    };
+  });
+}
 function isTaskLine(line) {
   return TASK_LINE.test(line);
 }
@@ -632,8 +716,8 @@ function setField(line, key, value) {
   }
   return join(parts);
 }
-function cleanTag(raw) {
-  const t = raw.trim().replace(/^#+/, "").replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_/-]/gu, "");
+function cleanTag(raw2) {
+  const t = raw2.trim().replace(/^#+/, "").replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_/-]/gu, "");
   return /[\p{L}_/-]/u.test(t) ? t : null;
 }
 function addTag(line, tag) {
@@ -779,6 +863,13 @@ function destinationOf(lines, line, routes, inboxModuleId) {
   if (inbox) return { route: inbox, module: inbox.modules.find((m) => m.id === inboxModuleId).name, via: "inbox" };
   return { route: null, module: null, via: "none" };
 }
+function taskModuleOf(dest, inboxModuleId) {
+  if (!dest.route) return null;
+  if (dest.via === "inbox") return inboxModuleId;
+  const tasks = dest.route.modules.filter((m) => m.type === "TASKS");
+  if (dest.module) return tasks.find((m) => lc2(m.name) === lc2(dest.module))?.id ?? null;
+  return tasks[0]?.id ?? null;
+}
 var TYPE_OF = { tasks: "TASKS", notes: "NOTES" };
 function listTargets(routes, spaces, kind, boundRootId) {
   const parent = new Map(spaces.map((s) => [s.id, s.parentId ?? null]));
@@ -827,6 +918,32 @@ var TOOLBAR_LISTS_PATH = "Graphite/Toolbar lists.json";
 function isToolbarFile(path) {
   return path === TOOLBAR_LISTS_PATH;
 }
+var MAX_WORD = 40;
+var MAX_WORDS = 24;
+function wordsList(v, kinds) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const w of v) {
+    const name = typeof w?.name === "string" ? w.name.trim().slice(0, MAX_WORD) : "";
+    if (!name || typeof w?.countsAs !== "string" || !kinds.includes(w.countsAs)) continue;
+    out.push({ name, countsAs: w.countsAs });
+    if (out.length >= MAX_WORDS) break;
+  }
+  return out;
+}
+function wordsOf2(v) {
+  return {
+    priorities: wordsList(v?.priorities, BUILT_IN_PRIORITIES),
+    statuses: wordsList(v?.statuses, BUILT_IN_STATUSES)
+  };
+}
+function wordsFromSettings(settings) {
+  const words = wordsOf2(settings);
+  if (!words.priorities.length && !words.statuses.length) return null;
+  const shipped = defaultVocabulary();
+  const same2 = (a, b) => a.length === b.length && a.every((w, i) => w.name === b[i].name && w.countsAs === b[i].countsAs);
+  return same2(words.priorities, shipped.priorities) && same2(words.statuses, shipped.statuses) ? null : words;
+}
 var str = (v) => typeof v === "string" ? v : "";
 var strOrNull = (v) => typeof v === "string" && v ? v : null;
 function spaceOf(v) {
@@ -857,7 +974,8 @@ function buildLists(input) {
       id,
       ps.map((p) => ({ name: p.name, color: p.color ?? null }))
     ])),
-    tags: [...seen.values()].sort((a, b) => a.localeCompare(b))
+    tags: [...seen.values()].sort((a, b) => a.localeCompare(b)),
+    words: Object.fromEntries(Object.entries(input.words ?? {}).map(([id, w]) => [id, wordsOf2(w)]).filter(([, w]) => w.priorities.length || w.statuses.length))
   };
 }
 function listsFile(lists) {
@@ -865,24 +983,25 @@ function listsFile(lists) {
 `;
 }
 function readListsFile(text) {
-  let raw;
+  let raw2;
   try {
-    raw = JSON.parse(text);
+    raw2 = JSON.parse(text);
   } catch {
     return null;
   }
-  if (!raw || raw.graphite !== "toolbar-lists" || !Array.isArray(raw.spaces)) return null;
+  if (!raw2 || raw2.graphite !== "toolbar-lists" || !Array.isArray(raw2.spaces)) return null;
   const people = {};
-  for (const [id, ps] of Object.entries(raw.people ?? {})) {
+  for (const [id, ps] of Object.entries(raw2.people ?? {})) {
     if (!Array.isArray(ps)) continue;
     people[id] = ps.filter((p) => p && typeof p.name === "string" && p.name).map((p) => ({ name: p.name, color: strOrNull(p.color) }));
   }
   return buildLists({
-    at: str(raw.at),
-    bound: { rootId: strOrNull(raw.bound?.rootId), inboxModuleId: strOrNull(raw.bound?.inboxModuleId) },
-    spaces: raw.spaces,
+    at: str(raw2.at),
+    bound: { rootId: strOrNull(raw2.bound?.rootId), inboxModuleId: strOrNull(raw2.bound?.inboxModuleId) },
+    spaces: raw2.spaces,
     people,
-    tags: Array.isArray(raw.tags) ? raw.tags.filter((t) => typeof t === "string") : []
+    tags: Array.isArray(raw2.tags) ? raw2.tags.filter((t) => typeof t === "string") : [],
+    words: raw2.words && typeof raw2.words === "object" ? raw2.words : {}
   });
 }
 function sameLists(a, b) {
@@ -1748,7 +1867,7 @@ var module_names_default = {
     records: "Tasks"
   },
   NOTES: {
-    name: "Notes",
+    name: "Notebook",
     record: "Note",
     records: "Notes"
   },
@@ -1776,6 +1895,11 @@ var module_names_default = {
     name: "Visits",
     record: "Visit",
     records: "Visits"
+  },
+  CIRCLES: {
+    name: "Savings Circle",
+    record: "Circle",
+    records: "Circles"
   },
   REFERENCE: {
     name: "Lists",
@@ -1844,8 +1968,8 @@ var module_names_default = {
   },
   COMMENTS: {
     name: "Thread",
-    record: "Reply",
-    records: "Replies"
+    record: "Message",
+    records: "Messages"
   },
   TABLES: {
     name: "Tables",
@@ -1887,11 +2011,6 @@ var module_names_default = {
     record: "Item",
     records: "Items"
   },
-  CIRCLES: {
-    name: "Savings Circle",
-    record: "Circle",
-    records: "Circles"
-  },
   CARE: {
     name: "Care",
     record: "Care event",
@@ -1906,6 +2025,11 @@ var module_names_default = {
     name: "Pregnancy",
     record: "Appointment",
     records: "Appointments"
+  },
+  JOURNAL: {
+    name: "Journal",
+    record: "Memory",
+    records: "Memories"
   }
 };
 
@@ -2192,6 +2316,161 @@ function mirrorShort(look) {
   if (!look) return "checking";
   if (!look.folders.length) return "no notes from Graphite here";
   return look.changedHere > 0 ? `${look.changedHere} changed here, for Graphite to take` : `${plural(look.spaces, "space")} from this device`;
+}
+
+// src/device-door.ts
+var DOOR_FILE = "plugin-door.json";
+var DOOR_ENV = "GRAPHITE_PLUGIN_DOOR";
+function doorFileCandidates(env, platform, join3) {
+  const out = [];
+  if (env[DOOR_ENV]) out.push(env[DOOR_ENV]);
+  const home = env.HOME || env.USERPROFILE || "";
+  if (platform === "win32") {
+    const roaming = env.APPDATA || (home ? join3(home, "AppData", "Roaming") : "");
+    if (roaming) out.push(join3(roaming, "findgraphite.com", "Graphite", DOOR_FILE));
+  } else if (platform === "darwin") {
+    if (home) {
+      out.push(join3(
+        home,
+        "Library",
+        "Containers",
+        "com.findgraphite.app",
+        "Data",
+        "Library",
+        "Application Support",
+        "com.findgraphite.app",
+        DOOR_FILE
+      ));
+      out.push(join3(home, "Library", "Application Support", "com.findgraphite.app", DOOR_FILE));
+    }
+  } else {
+    const data = env.XDG_DATA_HOME || (home ? join3(home, ".local", "share") : "");
+    if (data) out.push(join3(data, "com.findgraphite.app", DOOR_FILE));
+  }
+  return out;
+}
+function readDoor(text) {
+  let j;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!j || j.v !== 1 || j.app !== "Graphite") return null;
+  const port = j.port;
+  const key = j.key;
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  if (typeof key !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(key)) return null;
+  return { port, key };
+}
+function doorBase(door) {
+  return `http://127.0.0.1:${door.port}`;
+}
+function findDoor(candidates, read) {
+  for (const path of candidates) {
+    const text = read(path);
+    if (text === null) continue;
+    const door = readDoor(text);
+    return door ? { ok: true, door } : { ok: false, why: "unreadable" };
+  }
+  return { ok: false, why: "no-file" };
+}
+function doorSentence(why) {
+  switch (why) {
+    case "phone":
+      return "This computer needs Obsidian on a desktop, with the Graphite app on the same computer. On a phone, use Server instead.";
+    case "no-file":
+      return 'The Graphite app has not been set up to be read on this computer. Open it, go to Settings, Data and server, and turn on "Let the notes plugin read Graphite on this computer".';
+    case "unreadable":
+      return "The file Graphite leaves for this plugin could not be read. Turn the setting off and on again in the Graphite app (Settings, Data and server).";
+    case "refused":
+      return "The Graphite app is not running. Open it and try again.";
+  }
+}
+function doorShort(why) {
+  return why === "phone" ? "needs the desktop app" : why === "refused" ? "Graphite is not running" : why === "no-file" ? "not turned on in Graphite" : "Graphite file unreadable";
+}
+
+// src/page-files.ts
+var PAGE_FILE_TYPE = "notebook_page";
+var dirOf = (path) => {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? "" : path.slice(0, i);
+};
+var baseOf = (path) => {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return name.replace(/\.md$/i, "");
+};
+function front(text) {
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  if (!text.startsWith(`---${eol}`)) return null;
+  const end = text.indexOf(`${eol}---`, 3);
+  if (end < 0) return null;
+  const after = end + eol.length + 3;
+  if (after < text.length && !text.startsWith(eol, after)) return null;
+  return { lines: text.slice(3 + eol.length, end).split(eol), eol, rest: text.slice(after) };
+}
+var keyOf2 = (line) => {
+  const i = line.indexOf(":");
+  return i > 0 ? line.slice(0, i).trim() : "";
+};
+var quote = (s) => JSON.stringify(s);
+function raw(text, key) {
+  const f = front(text);
+  if (!f) return void 0;
+  const line = f.lines.find((l) => keyOf2(l) === key);
+  return line === void 0 ? void 0 : line.slice(line.indexOf(":") + 1).trim();
+}
+var unquote = (v) => {
+  if (v === void 0) return null;
+  try {
+    const x = JSON.parse(v);
+    return typeof x === "string" ? x : null;
+  } catch {
+    return null;
+  }
+};
+var isPageText = (text) => raw(text, "gr_type") === PAGE_FILE_TYPE;
+var pageIdOf = (text) => isPageText(text) ? raw(text, "gr_id") ?? null : null;
+function pageFieldsOf(text) {
+  return { title: unquote(raw(text, "title")), section: unquote(raw(text, "section")) };
+}
+function notebookDirOf(path, text) {
+  const here = dirOf(path);
+  return pageFieldsOf(text).section ? dirOf(here) : here;
+}
+function setPageFields(text, set) {
+  const f = front(text);
+  if (!f) return text;
+  const lines = [...f.lines];
+  const put = (key, value, after) => {
+    const at = lines.findIndex((l) => keyOf2(l) === key);
+    if (value === null) {
+      if (at >= 0) lines.splice(at, 1);
+      return;
+    }
+    const line = `${key}: ${quote(value)}`;
+    if (at >= 0) {
+      lines[at] = line;
+      return;
+    }
+    const prev = lines.findIndex((l) => keyOf2(l) === after);
+    lines.splice(prev >= 0 ? prev + 1 : lines.length, 0, line);
+  };
+  if (set.title !== void 0) put("title", set.title, "instance_name");
+  if (set.section !== void 0) put("section", set.section, "title");
+  return `---${f.eol}${lines.join(f.eol)}${f.eol}---${f.rest}`;
+}
+function pageRenameOf(from, to, notebookDir) {
+  const out = {};
+  if (baseOf(from) !== baseOf(to)) out.title = baseOf(to);
+  const was = dirOf(from);
+  const now = dirOf(to);
+  if (was !== now) {
+    if (now === notebookDir) out.section = null;
+    else if (dirOf(now) === notebookDir) out.section = now.slice(now.lastIndexOf("/") + 1);
+  }
+  return out.title === void 0 && out.section === void 0 ? null : out;
 }
 
 // ../../apps/api/src/auth/session-stamp.ts
@@ -2483,13 +2762,15 @@ function inNoteSyncScope(path) {
 var SETTINGS_NOTE_PATH = "Graphite/Sync settings.md";
 var NOTE_KEYS = [
   { key: "serverUrl", kind: { kind: "url" }, label: "Graphite server" },
-  { key: "source", kind: { kind: "choice", options: ["server", "device"] }, label: "Where Graphite is" },
+  { key: "source", kind: { kind: "choice", options: ["server", "device", "computer"] }, label: "Where Graphite is" },
   { key: "layout", kind: { kind: "choice", options: ["folder", "single"] }, label: "How a pulled space lands" },
+  { key: "mirrorAll", kind: { kind: "bool" }, label: "Bring in every space" },
   { key: "hideIds", kind: { kind: "bool" }, label: "Hide sync ids" },
   { key: "autoPush", kind: { kind: "bool" }, label: "Auto-push on save" },
   { key: "captureAnyTagged", kind: { kind: "bool" }, label: "Capture any tagged line as a note" },
   { key: "captureTags", kind: { kind: "text" }, label: "Tags that capture a line" },
   { key: "autoCapture", kind: { kind: "bool" }, label: "Capture automatically" },
+  { key: "pagesOn", kind: { kind: "bool" }, label: "Send notes to Graphite as pages" },
   { key: "pageFolders", kind: { kind: "text" }, label: "Folders whose notes become pages" },
   { key: "censusOn", kind: { kind: "bool" }, label: "Send the vault census" },
   { key: "agentOn", kind: { kind: "bool" }, label: "Publish the agent contract" },
@@ -2508,8 +2789,10 @@ var KEPT_OUT = {
   vaultId: "the vault identity: a copied note must not make two vaults one to the server",
   configFile: "the switch for this note itself",
   files: "which notes are synced spaces, kept by the plugin as it pulls",
+  spacesSeen: "the spaces this vault has already been offered, so one the person stopped syncing is not brought back: kept per vault",
   bases: "the text each synced note had when the server last wrote it, kept per device so a push can say what changed here",
   ticks: "the last agreed state of each captured line",
+  pageModules: "the Notes module chosen for each page folder: module ids belong to one server, so each device keeps its own",
   pagesSent: "each note sent as a page and the fingerprint of the text last sent, kept per device",
   routingList: "the plugin copy of the routing list",
   routeCache: "the spaces the route picker last saw",
@@ -2553,8 +2836,8 @@ function settingsNoteText(settings, previous = null) {
   });
   return ["---", ...props, ...foreign, ...lines.slice(fm.to)].join("\n");
 }
-function readValue(raw) {
-  const t = raw.trim();
+function readValue(raw2) {
+  const t = raw2.trim();
   if (t.startsWith('"')) {
     try {
       return String(JSON.parse(t));
@@ -2583,7 +2866,7 @@ function readSettingsNote(text) {
       problems.push(`Line ${i + 1}: not a setting line (name: value).`);
       continue;
     }
-    const [, key, raw] = m;
+    const [, key, raw2] = m;
     if (SECRET_KEYS.includes(key)) {
       problems.push(`Line ${i + 1}: ${key} is a secret and is not read from a note \u2014 enter it in the settings screen.`);
       continue;
@@ -2593,7 +2876,7 @@ function readSettingsNote(text) {
       if (key in KEPT_OUT) problems.push(`Line ${i + 1}: ${key} is not read from a note \u2014 it is ${KEPT_OUT[key]}.`);
       continue;
     }
-    const v = readValue(raw);
+    const v = readValue(raw2);
     switch (spec.kind.kind) {
       case "bool":
         if (v === "true" || v === "false") values[key] = v === "true";
@@ -2638,6 +2921,15 @@ function hasRoutingHeading(text) {
     if (!fence && /^#{1,6}\s.*>>\s*\S/.test(t)) return true;
   }
   return false;
+}
+function pageModuleFor(path, setting, modules) {
+  let best = "";
+  for (const f of parseFolders(setting)) {
+    if (path.startsWith(`${f}/`) && f.length > best.length) best = f;
+  }
+  if (!best) return void 0;
+  const id = modules?.[best];
+  return typeof id === "string" && id ? id : void 0;
 }
 function isPage(path, text, folders) {
   return inPageFolder(path, folders) || hasRoutingHeading(text);
@@ -2724,12 +3016,16 @@ var PageSync = class {
     const text = await this.host.read(path);
     if (text === null) return false;
     if (!isPage(path, text, this.host.folders())) return false;
-    const print = fingerprint(text);
+    const moduleId = this.host.moduleFor(path);
+    const print = fingerprint(text) + (moduleId ? `@${moduleId}` : "");
+    const prior = this.host.sent[path] ?? (oldPath ? this.host.sent[oldPath] : void 0);
     if (this.host.sent[path] === print && !oldPath) return true;
+    const where = moduleId ? { moduleId } : prior?.includes("@") ? { moduleId: null } : {};
     const res = await this.host.send("PUT", {
       path,
       content: text,
       vaultName: this.host.vaultName(),
+      ...where,
       ...oldPath ? { oldPath } : {}
     });
     if (res.status >= 300) {
@@ -2873,13 +3169,13 @@ var NoteKey = class _NoteKey {
     return out;
   }
   /** The inverse of seal; null when it does not open. */
-  async open(raw) {
-    if (raw.length < NONCE_BYTES + TAG_BYTES) return null;
+  async open(raw2) {
+    if (raw2.length < NONCE_BYTES + TAG_BYTES) return null;
     try {
       return new Uint8Array(await subtle().decrypt(
-        { name: "AES-GCM", iv: buf(raw.subarray(0, NONCE_BYTES)) },
+        { name: "AES-GCM", iv: buf(raw2.subarray(0, NONCE_BYTES)) },
         this.aes,
-        buf(raw.subarray(NONCE_BYTES))
+        buf(raw2.subarray(NONCE_BYTES))
       ));
     } catch {
       return null;
@@ -2942,9 +3238,9 @@ async function sealFile(key, f) {
   return bytesToBase64(await key.seal(clear));
 }
 async function openFile(key, sealed) {
-  const raw = base64ToBytes(sealed);
-  if (!raw) return null;
-  const clear = await key.open(raw);
+  const raw2 = base64ToBytes(sealed);
+  if (!raw2) return null;
+  const clear = await key.open(raw2);
   if (!clear || clear.length < 4) return null;
   const len = new DataView(clear.buffer, clear.byteOffset, clear.byteLength).getUint32(0);
   if (4 + len > clear.length) return null;
@@ -3175,8 +3471,12 @@ function hunks(a, b) {
   return out;
 }
 var same = (x, y) => x.from === y.from && x.to === y.to && x.lines.length === y.lines.length && x.lines.every((l, k) => l === y.lines[k]);
-var touch = (x, y) => x.from <= y.to && y.from <= x.to;
-function mergeLines(base, ours, theirs) {
+var touch = (x, y, adjacentOk) => {
+  if (!adjacentOk) return x.from <= y.to && y.from <= x.to;
+  if (x.from < y.to && y.from < x.to) return true;
+  return x.from === x.to && y.from === y.to && x.from === y.from;
+};
+function mergeLines(base, ours, theirs, opts = {}) {
   if (ours === theirs) return { clean: true, text: ours };
   if (ours === base) return { clean: true, text: theirs };
   if (theirs === base) return { clean: true, text: ours };
@@ -3186,7 +3486,7 @@ function mergeLines(base, ours, theirs) {
   if (!mine || !yours) return { clean: false };
   const all = [];
   for (const h of mine) {
-    const clash = yours.find((y) => touch(h, y));
+    const clash = yours.find((y) => touch(h, y, !!opts.adjacent));
     if (clash && !same(h, clash)) return { clean: false };
     all.push(h);
   }
@@ -3200,6 +3500,43 @@ function mergeLines(base, ours, theirs) {
   }
   out.push(...b.slice(at));
   return { clean: true, text: out.join("") };
+}
+var MARKER_ONLY = new RegExp("^(?:" + LP_ID_RE.source + ")$");
+var HAS_ID = new RegExp(LP_ID_RE.source);
+var eolOf = (line) => /\r?\n$/.exec(line)?.[0] ?? "";
+function carryIds(pushed, typed, canonical) {
+  const p = splitLines(pushed);
+  const t = splitLines(typed);
+  const c = splitLines(canonical);
+  const typedHunks = hunks(p, t);
+  const canonHunks = hunks(p, c);
+  if (!typedHunks || !canonHunks) return typed;
+  const marker = /* @__PURE__ */ new Map();
+  for (const h of canonHunks) {
+    if (h.to - h.from !== h.lines.length) continue;
+    h.lines.forEach((cl, k) => {
+      const was = p[h.from + k].replace(/\r?\n$/, "");
+      const now = cl.replace(/\r?\n$/, "");
+      if (!now.startsWith(was)) return;
+      const rest = now.slice(was.length);
+      if (rest && MARKER_ONLY.test(rest)) marker.set(h.from + k, rest);
+    });
+  }
+  if (!marker.size) return typed;
+  const out = [...t];
+  let shift = 0;
+  for (const h of typedHunks) {
+    if (h.to - h.from === h.lines.length) {
+      h.lines.forEach((tl, k) => {
+        const m = marker.get(h.from + k);
+        if (!m || HAS_ID.test(tl)) return;
+        const body = tl.replace(/\r?\n$/, "");
+        out[h.from + k + shift] = body + m + eolOf(tl);
+      });
+    }
+    shift += h.lines.length - (h.to - h.from);
+  }
+  return out.join("");
 }
 
 // src/note-engine.ts
@@ -3507,6 +3844,8 @@ var DEFAULTS = {
   serverUrl: "",
   token: "",
   files: {},
+  mirrorAll: true,
+  spacesSeen: [],
   bases: {},
   autoPush: false,
   hideIds: true,
@@ -3516,6 +3855,8 @@ var DEFAULTS = {
   captureTags: "",
   autoCapture: false,
   pageFolders: "",
+  pagesOn: false,
+  pageModules: {},
   pagesSent: {},
   ticks: {},
   censusOn: false,
@@ -3540,6 +3881,7 @@ var DEFAULTS = {
 };
 var VAULT_HEADER = "x-graphite-vault";
 var NO_SERVER = "http://127.0.0.1:1";
+var NO_DOOR = "http://127.0.0.1:1";
 function mintVaultId() {
   const c = globalThis.crypto;
   if (typeof c.randomUUID === "function") return c.randomUUID();
@@ -3557,8 +3899,16 @@ function asServerSpelling(line) {
 }
 var CAPTURE_TASK_LINE = /^\s*[-*]\s+\[( |x|X)\]\s*\S/;
 var CAPTURE_TAGGED_LINE = /(^|\s)#[\p{L}\p{N}_/-]+/u;
+var CAPTURE_BULLET = /^\s*[-*+]\s+\S/;
 function captureCandidates(lines, tagged = false) {
-  return bodyLines(lines).filter((i) => !PROPOSAL_TAIL.test(lines[i]) && (CAPTURE_TASK_LINE.test(lines[i]) || tagged && CAPTURE_TAGGED_LINE.test(lines[i])));
+  let heading;
+  return bodyLines(lines).filter((i) => {
+    if (/^#{1,6}\s/.test(lines[i].trim())) {
+      heading = lines[i];
+      return false;
+    }
+    return !PROPOSAL_TAIL.test(lines[i]) && (CAPTURE_TASK_LINE.test(lines[i]) || tagged && CAPTURE_TAGGED_LINE.test(lines[i]) || CAPTURE_BULLET.test(lines[i]) && sectionNamesModule(heading));
+  });
 }
 function tickLines(text) {
   const lines = text.split("\n");
@@ -3582,6 +3932,7 @@ function firstOf(text, marks, from) {
 }
 function keepFreeform(old, fresh) {
   if (!old) return fresh;
+  if (isPageText(fresh)) return fresh;
   const a = firstOf(old, FF_STARTS, 0);
   if (!a) return fresh;
   const b = firstOf(old, FF_ENDS, a.at + a.len);
@@ -3685,6 +4036,19 @@ function importerSaid(report) {
 var BASE_MAX_NOTES = 400;
 var BASE_MAX_CHARS = 4e6;
 var BASE_MAX_ONE = 4e5;
+function folderHeldByAnother(files, folder, spaceId) {
+  const lower = folder.toLowerCase();
+  return Object.values(files).some((e) => e.spaceId !== spaceId && e.folder?.toLowerCase() === lower);
+}
+function distinctFolder(name, spaceId) {
+  return `${name} (${spaceId.slice(-6)})`;
+}
+function singleFileFor(files, space) {
+  const stem = space.name.replace(/[\\/:*?"<>|]/g, "_");
+  const plain = `${stem}.md`;
+  const held = Object.entries(files).some(([p, e]) => e.spaceId !== space.id && p.toLowerCase() === plain.toLowerCase());
+  return held ? `${distinctFolder(stem, space.id)}.md` : plain;
+}
 function putBase(bases, path, text) {
   delete bases[path];
   if (text.length > BASE_MAX_ONE) return;
@@ -3725,7 +4089,7 @@ function relTime(ms2) {
   if (d < 864e5) return `${Math.floor(d / 36e5)} h ago`;
   return `${Math.floor(d / 864e5)} d ago`;
 }
-var GraphitePlugin = class extends import_obsidian4.Plugin {
+var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
   settings = DEFAULTS;
   statusEl = null;
   /** Above zero while the plugin itself writes a vault file
@@ -3742,6 +4106,9 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
    *  Held in memory only, refreshed by every binding read, and false until
    *  one answers, so no tick reaches a server before capture is known on. */
   captureOn = false;
+  /** Whether this vault is bound to a space, as the server last said - the
+   *  half of captureOn that pages need (they never touch the inbox). */
+  vaultBound = false;
   /** OC4: per-note timers for the two gestures read off a line. */
   gestureTimers = {};
   /** How long a note must sit still before a tick or an un-italicised line
@@ -3750,6 +4117,13 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
   /** Said once per session, not on every keystroke. */
   toldNoInbox = false;
   pushTimers = {};
+  /** FINDING 120: THE PATHS A PUSH IS IN FLIGHT FOR. A second push of the
+   *  same note while one is running read the same file, sent the same new
+   *  sections without ids, and made every one of them twice. The second
+   *  asks to run again instead (the value is how it was asked), once the
+   *  first has written the ids back, and sends what the file says by then. */
+  pushing = /* @__PURE__ */ new Map();
+  pushAgain = /* @__PURE__ */ new Map();
   lastMe = null;
   lastHealth = null;
   /** R-1500: what the LAST vault report was told.
@@ -3867,6 +4241,7 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
     this.setStatus("\u2026", "checking");
     window.setTimeout(() => void this.checkConnection(false), 800);
     this.addCommand({ id: "lp-open-panel", name: "Open the sync panel", callback: () => this.openPanel() });
+    this.addCommand({ id: "lp-pull-all", name: "Bring in every space", callback: () => void this.mirrorEverySpace(true) });
     this.addCommand({ id: "lp-pull-space", name: "Pull a space (pick destination vault)", callback: () => this.chooseAndPull() });
     this.addCommand({ id: "lp-pull-selective", name: "Pull a space into THIS vault, choosing modules", callback: () => this.chooseAndPullSelective() });
     this.addCommand({ id: "lp-push-file", name: "Push the current file back to Graphite", callback: () => this.pushCurrent() });
@@ -3928,8 +4303,9 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
     this.registerEvent(this.app.vault.on("modify", captureSoon));
     this.registerEvent(this.app.vault.on("create", captureSoon));
     this.pages = new PageSync({
-      on: () => this.captureOn && !this.onDevice,
+      on: () => this.settings.pagesOn && this.vaultBound && !this.offServer,
       folders: () => this.settings.pageFolders,
+      moduleFor: (p) => pageModuleFor(p, this.settings.pageFolders, this.settings.pageModules),
       vaultName: () => this.app.vault.getName(),
       excluded: (p) => !!this.settings.files[p] || isAgentFile(p) || p === SETTINGS_NOTE_PATH || p.startsWith("."),
       isOpen: (p) => this.app.workspace.getActiveFile()?.path === p,
@@ -4019,11 +4395,7 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
     this.registerEvent(this.app.vault.on("modify", (f) => {
       if (!this.settings.autoPush || this.writingBack > 0) return;
       if (!(f instanceof import_obsidian4.TFile) || !this.settings.files[f.path]) return;
-      window.clearTimeout(this.pushTimers[f.path]);
-      this.pushTimers[f.path] = window.setTimeout(
-        () => void this.pushFile(f.path, { auto: true }),
-        2500
-      );
+      this.schedulePush(f.path);
     }));
     this.addCommand({
       id: "lp-write-settings-note",
@@ -4054,13 +4426,24 @@ var GraphitePlugin = class extends import_obsidian4.Plugin {
     this.registerEvent(this.app.vault.on("create", () => this.noteSyncSoon()));
     this.registerEvent(this.app.vault.on("delete", (f) => {
       const gone = f?.path;
+      if (gone && this.writingBack === 0 && this.settings.files[gone]?.role === "page") {
+        this.pageVanished(gone);
+        this.noteSyncSoon();
+        return;
+      }
       if (gone && this.settings.bases[gone] !== void 0) {
         delete this.settings.bases[gone];
         void this.saveSettings();
       }
       this.noteSyncSoon();
     }));
-    this.registerEvent(this.app.vault.on("rename", (_f, from) => {
+    this.registerEvent(this.app.vault.on("rename", (f, from) => {
+      const to = f?.path;
+      if (this.writingBack === 0 && typeof from === "string" && to && this.settings.files[from]?.role === "page") {
+        void this.pageRenamed(from, to);
+        this.noteSyncSoon();
+        return;
+      }
       if (typeof from === "string" && this.settings.bases[from] !== void 0) {
         delete this.settings.bases[from];
         void this.saveSettings();
@@ -4405,8 +4788,23 @@ ${p}`))}`;
    * what needs a server is stopped HERE, with a sentence, by `needsServer` —
    * a person never reads a raw failure from a call that was never going to
    * be made. */
+  /* ══ THIS COMPUTER ═══════════════════════════════════════════════════════
+   *
+   * One switch, `source`, decides where every request goes, and everything
+   * below it asks `endpoint()` instead of reading the server settings. So
+   * the Graphite app on this computer answers the calls a server answers
+   * (the allowlist is on its side), and what it does not answer is stopped
+   * HERE, with a sentence, by `needsServer` — a person never reads a raw
+   * 404 from a route the app was never going to have. */
   get onDevice() {
     return this.settings.source === "device";
+  }
+  get onComputer() {
+    return this.settings.source === "computer";
+  }
+  /** Neither a device nor a computer asks a server: what needs one stops. */
+  get offServer() {
+    return this.onDevice || this.onComputer;
   }
   /** What the vault last said the app left in it. Null until looked at. */
   mirrorLook = null;
@@ -4420,10 +4818,48 @@ ${p}`))}`;
     });
     return this.mirrorLook;
   }
+  doorSeen = null;
+  /** The door of the app, found in the file it leaves. Kept for a few seconds so
+   *  a burst of requests reads the file once; `fresh` always reads it, and a
+   *  connection check does, because that is where a restarted app is
+   *  noticed. A phone has no app and no files to read. */
+  doorLook(fresh = false) {
+    if (!import_obsidian4.Platform.isDesktopApp) return { ok: false, why: "phone" };
+    const now = Date.now();
+    if (!fresh && this.doorSeen && now - this.doorSeen.at < 3e3) return this.doorSeen.look;
+    const look = this.readDoorFile();
+    this.doorSeen = { at: now, look };
+    return look;
+  }
+  readDoorFile() {
+    const req = window.require;
+    if (!req) return { ok: false, why: "phone" };
+    try {
+      const fs = req("fs");
+      const p = req("path");
+      const proc = globalThis.process;
+      return findDoor(
+        doorFileCandidates(proc?.env ?? {}, proc?.platform ?? "", (...a) => p.join(...a)),
+        (f) => {
+          try {
+            return fs.readFileSync(f, "utf8");
+          } catch {
+            return null;
+          }
+        }
+      );
+    } catch {
+      return { ok: false, why: "unreadable" };
+    }
+  }
   /** Where requests go and the key they carry, or null when there is
    *  nowhere to send them. A device has no server to send anything to. */
   endpoint() {
     if (this.onDevice) return null;
+    if (this.onComputer) {
+      const look = this.doorLook();
+      return look.ok ? { base: doorBase(look.door), token: look.door.key } : null;
+    }
     if (!this.settings.serverUrl || !this.settings.token) return null;
     return { base: this.settings.serverUrl.replace(/\/+$/, ""), token: this.settings.token };
   }
@@ -4440,32 +4876,40 @@ ${p}`))}`;
         long: "this vault reads Graphite from the Graphite app on this device, which writes the notes into the vault itself. There is nothing to pull or push here."
       };
     }
+    if (this.onComputer) {
+      const look = this.doorLook();
+      const why = look.ok ? "no-file" : look.why;
+      return { short: doorShort(why), long: doorSentence(why) };
+    }
     return { short: "not configured", long: "set the server URL and API token in settings first." };
   }
   /** Said when a connection check fails, for the pull and add commands. */
   noConnectionNote() {
-    return this.onDevice ? `Graphite: ${this.notConfigured().long}` : "Graphite: no connection \u2014 check the server URL and token in settings.";
+    return this.onDevice ? `Graphite: ${this.notConfigured().long}` : this.onComputer ? `Graphite: no connection \u2014 ${this.notConfigured().long}` : "Graphite: no connection \u2014 check the server URL and token in settings.";
   }
   /** A feature that needs a server, asked for while this vault reads from
-   *  the Graphite app on this device. True means it was said and the caller
-   *  stops. Said once a session when `loud` is false, for the ones that run
+   *  the Graphite app on this device or computer. True means it was said and the
+   *  caller stops. Said once a session when `loud` is false, for the ones that run
    *  on their own (a ticked box, a census). */
   needsServer(what, loud = true) {
-    if (!this.onDevice) return false;
+    if (!this.offServer) return false;
     if (loud || !this.toldDevice.has(what)) {
-      new import_obsidian4.Notice(`Graphite: ${what} needs a Graphite server. The Graphite app on this device does not do it for a notes app, so nothing was changed.`, 1e4);
+      new import_obsidian4.Notice(`Graphite: ${what} needs a Graphite server. The Graphite app on this ` + (this.onComputer ? "computer does not do it for a notes app yet, so nothing was changed." : "device does not do it for a notes app, so nothing was changed."), 1e4);
       this.toldDevice.add(what);
     }
     return true;
   }
   toldDevice = /* @__PURE__ */ new Set();
+  /** The app on this computer said it lets notes apps read and not change.
+   *  Remembered so an auto-push does not say it again on every edit. */
+  computerReadOnly = false;
   api(path) {
-    const base = this.onDevice ? NO_SERVER : this.settings.serverUrl.replace(/\/+$/, "");
+    const base = this.onDevice ? NO_SERVER : this.onComputer ? this.endpoint()?.base ?? NO_DOOR : this.settings.serverUrl.replace(/\/+$/, "");
     return `${base}/api${path}`;
   }
   get headers() {
     return {
-      Authorization: `Bearer ${this.onDevice ? "" : this.settings.token}`,
+      Authorization: `Bearer ${this.onDevice ? "" : this.onComputer ? this.endpoint()?.token ?? "" : this.settings.token}`,
       [VAULT_HEADER]: this.settings.vaultId
     };
   }
@@ -4510,13 +4954,17 @@ ${p}`))}`;
       this.refreshPanel();
       return false;
     }
+    if (this.onComputer) {
+      this.doorLook(true);
+      this.computerReadOnly = false;
+    }
     if (!this.configured) {
       this.lastMe = null;
       this.lastHealth = null;
       this.lastCheck = null;
       const say = this.notConfigured();
       this.setStatus(say.short, "bad");
-      if (loud) new import_obsidian4.Notice(`Graphite: ${say.long}`);
+      if (loud) new import_obsidian4.Notice(`Graphite: ${say.long}`, this.onComputer ? 12e3 : void 0);
       this.refreshPanel();
       return false;
     }
@@ -4528,13 +4976,13 @@ ${p}`))}`;
       ]);
       this.lastMe = me.json;
       this.lastHealth = health?.json ?? null;
-      const who = this.lastMe?.name ?? this.lastMe?.email ?? "connected";
+      const who = this.onComputer ? "this computer" : this.lastMe?.name ?? this.lastMe?.email ?? "connected";
       this.lastCheck = {
         at: Date.now(),
         ok: true,
         detail: [
           this.lastHealth?.version ? `Graphite ${this.lastHealth.version}` : "",
-          `signed in as ${who}`
+          this.onComputer ? "read from this computer, no server" : `signed in as ${who}`
         ].filter(Boolean).join(" \xB7 ")
       };
       if (this.handshake?.outdated) {
@@ -4543,7 +4991,9 @@ ${p}`))}`;
         if (loud) new import_obsidian4.Notice(outdatedSentence(this.handshake, "written"), 12e3);
       } else {
         this.setStatus(who, "ok");
-        if (loud) new import_obsidian4.Notice(`Graphite: connected as ${who}.`);
+        if (loud) {
+          new import_obsidian4.Notice(this.onComputer ? "Graphite: connected to the Graphite app on this computer." : `Graphite: connected as ${who}.`);
+        }
       }
       this.refreshPanel();
       this.refreshLinks();
@@ -4553,14 +5003,15 @@ ${p}`))}`;
       void this.publishToolbarListsSoon();
       if (this.settings.agentOn) void this.publishAgentContract();
       else void this.refreshRoutes();
+      void this.mirrorEverySpace(false);
       return true;
     } catch (e) {
       this.lastMe = null;
       const status = e?.status ?? "";
-      const why = status === 401 ? "token rejected (expired or revoked?)" : `unreachable (${status || e})`;
+      const why = this.onComputer ? status === 401 ? "Graphite did not accept the key; choose This computer again" : doorShort("refused") : status === 401 ? "token rejected (expired or revoked?)" : `unreachable (${status || e})`;
       this.lastCheck = { at: Date.now(), ok: false, detail: why };
       this.setStatus(why, "bad");
-      if (loud) new import_obsidian4.Notice(`Graphite: ${why}`);
+      if (loud) new import_obsidian4.Notice(`Graphite: ${this.onComputer && status !== 401 ? doorSentence("refused") : why}`);
       this.refreshPanel();
       return false;
     }
@@ -4643,6 +5094,9 @@ ${p}`))}`;
     if (this.onDevice) {
       throw new Error("link history needs a Graphite server");
     }
+    if (this.onComputer) {
+      throw new Error("the Graphite app on this computer does not keep link history for a notes app yet");
+    }
     const res = await (0, import_obsidian4.requestUrl)({
       url: this.api(`/records/${r.kind}/${encodeURIComponent(r.id)}/links`),
       headers: this.headers,
@@ -4677,7 +5131,7 @@ ${p}`))}`;
    *  STILL NOT AN ERROR AND STILL NOT A POPUP. Being refused is a correct
    *  outcome for a non-operator; what it is not is an invisible one. */
   async reportVault() {
-    if (this.onDevice) {
+    if (this.offServer) {
       this.vaultReport = null;
       this.refreshPanel();
       return;
@@ -4710,9 +5164,9 @@ ${p}`))}`;
    *  Asked when the settings tab opens — where a person looks — rather than
    *  on every connection check, which runs on its own every few minutes. */
   async fetchDevices() {
-    if (this.onDevice) {
+    if (this.offServer) {
       this.devices = null;
-      this.devicesReport = "device";
+      this.devicesReport = this.onComputer ? "computer" : "device";
       return;
     }
     if (!this.settings.serverUrl || !this.settings.token) {
@@ -4748,7 +5202,7 @@ ${p}`))}`;
    *  On a phone, or with no readable vault registry, that is this vault's
    *  own server — Obsidian shows a plugin no other vault there. */
   serversOnThisMachine() {
-    const configs = this.onDevice ? [] : [{ vault: "This vault", url: this.settings.serverUrl, here: true }];
+    const configs = this.offServer ? [] : [{ vault: "This vault", url: this.settings.serverUrl, here: true }];
     if (import_obsidian4.Platform.isDesktopApp) {
       const req = window.require;
       if (req) {
@@ -5652,15 +6106,15 @@ ${nextTaskLine(text)}`, { line: note.line, ch: text.length });
     const text = note && this.barFieldLine(note);
     if (!note || text === null) return;
     const line = note.line;
-    const current = readField(text, "priority")?.toLowerCase();
+    const current = readField(text, "priority")?.replace(/\\\|/g, "|").toLowerCase();
+    const lists = await this.barLists();
+    const inbox = lists?.bound.inboxModuleId ?? null;
+    const moduleId = taskModuleOf(destinationOf(note.lines, note.line, this.routes(), inbox), inbox);
+    const choices = priorityChoices(moduleId ? lists?.words[moduleId] : null);
     new PickModal(this.app, this.barMobile, this.barAnchor(editor), {
       title: "Priority",
-      items: PRIORITIES.map((p) => ({
-        label: p[0].toUpperCase() + p.slice(1),
-        hint: p === "normal" ? "default" : void 0,
-        data: p
-      })),
-      start: (i) => i.data === current,
+      items: choices.map((c) => ({ label: c.label, hint: c.hint, data: c.value })),
+      start: (i) => i.data.replace(/\\\|/g, "|").toLowerCase() === current,
       writes: (i) => `Writes | priority: ${i.data}`,
       onChoose: (i) => this.barWrite(editor, line, setField(asTaskLine(editor.getLine(line) ?? ""), "priority", i.data))
     }).open();
@@ -5781,7 +6235,7 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  be reached the file stands as it was. Names only: toolbar-lists.ts has
    *  no field for a token, an address, a vault id or a password. */
   async publishToolbarLists(opts = {}) {
-    if (!this.settings.barShare || !this.configured || this.onDevice) {
+    if (!this.settings.barShare || !this.configured || this.offServer) {
       if (opts.loud) new import_obsidian4.Notice("Graphite: the picker lists are written only while connected, with sharing on in the settings.");
       return;
     }
@@ -5835,7 +6289,7 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  use and the vault's binding. False when it could not be had — the last
    *  build stands. */
   async refreshToolbarLists() {
-    if (!this.configured || this.onDevice) return false;
+    if (!this.configured || this.offServer) return false;
     if (!await this.refreshRoutes()) return false;
     const spaces = this.settings.routeCache;
     const before = this.settings.toolbarCache;
@@ -5857,12 +6311,23 @@ ${block.join("\n")}`, { line, ch: old.length });
     let tags = before?.tags ?? [];
     const t = await (0, import_obsidian4.requestUrl)({ url: this.api("/tags"), headers: this.headers, throw: false }).catch(() => null);
     if (t && t.status < 300 && Array.isArray(t.json)) tags = t.json.map((x) => String(x.name ?? "")).filter(Boolean);
+    const words = {};
+    for (const s of routable(spaces)) {
+      for (const mod of (s.modules ?? []).filter((m) => m.type === "TASKS")) {
+        const res = await (0, import_obsidian4.requestUrl)({ url: this.api(`/modules/${mod.id}/task-settings`), headers: this.headers, throw: false }).catch(() => null);
+        if (res && res.status < 300) {
+          const w = wordsFromSettings(res.json);
+          if (w) words[mod.id] = w;
+        } else if (before?.words?.[mod.id]) words[mod.id] = before.words[mod.id];
+      }
+    }
     this.settings.toolbarCache = buildLists({
       at: (/* @__PURE__ */ new Date()).toISOString(),
       bound,
       spaces,
       people,
-      tags: [...tags, ...spaces.flatMap((s) => s.tags ?? [])]
+      tags: [...tags, ...spaces.flatMap((s) => s.tags ?? [])],
+      words
     });
     await this.saveSettings();
     return true;
@@ -5980,29 +6445,39 @@ ${block.join("\n")}`, { line, ch: old.length });
   }
   /** The binding, or null when the server is too old to know of one. */
   async fetchBinding() {
-    if (this.onDevice) {
+    if (this.offServer) {
       this.captureOn = false;
+      this.vaultBound = false;
       return null;
     }
     const res = await (0, import_obsidian4.requestUrl)({ url: this.vaultUrl(), headers: this.headers, throw: false });
     if (res.status === 404) {
       this.captureOn = false;
+      this.vaultBound = false;
       return null;
     }
     if (res.status >= 400) throw new Error(res.json?.message ?? `status ${res.status}`);
     const b = res.json;
     this.captureOn = !!(b.bound && b.inbox);
+    this.vaultBound = !!b.bound;
+    this.vaultAllSpaces = !!(b.bound && b.allSpaces);
     return b;
   }
   /** Bind this vault to a space, or unbind it (null). Says what happened,
    *  including an inbox the new wall no longer holds. */
-  async bindVault(rootSpaceId) {
+  async bindVault(rootSpaceId, allSpaces) {
     if (this.needsServer("Binding a vault to a space")) return null;
     const res = rootSpaceId ? await (0, import_obsidian4.requestUrl)({
       url: this.vaultUrl(),
       method: "PUT",
       contentType: "application/json",
-      body: JSON.stringify({ rootSpaceId, label: this.app.vault.getName() }),
+      // allSpaces is sent only when it is being changed: a new space for the
+      // vault must not quietly turn the switch off (or on).
+      body: JSON.stringify({
+        rootSpaceId,
+        label: this.app.vault.getName(),
+        ...allSpaces === void 0 ? {} : { allSpaces }
+      }),
       headers: this.headers,
       throw: false
     }) : await (0, import_obsidian4.requestUrl)({ url: this.vaultUrl(), method: "DELETE", headers: this.headers, throw: false });
@@ -6012,17 +6487,52 @@ ${block.join("\n")}`, { line, ch: old.length });
     }
     const b = res.json;
     this.captureOn = !!(b.bound && b.inbox);
+    this.vaultBound = !!b.bound;
+    this.vaultAllSpaces = !!(b.bound && b.allSpaces);
     if (b.inboxCleared) {
       new import_obsidian4.Notice("Graphite: the capture inbox was outside the new space, so it was cleared. Pick a new one before capturing.", 12e3);
     }
     return b;
   }
+  /** Whether the vault's binding says it may write back to every space the
+   *  account may write in. Read with the binding. */
+  vaultAllSpaces = false;
+  /** 0.6.2 · ALL MY SPACES (Omar, 2026-11-17, "All, opt-in switch"). Turns the
+   *  vault's wall from "the space it is bound to and what is nested in it"
+   *  into "any space this account may write in"; the server's permissions
+   *  still decide each write. Off by default, and the switch lives on the
+   *  vault's binding on the server, so it needs a bound vault - the bound
+   *  space stays where new spaces, captured lines and pages are put. Answers
+   *  whether the server now holds what was asked. */
+  async setAllSpaces(on) {
+    if (this.needsServer("Writing back to every space")) return false;
+    const b = await this.fetchBinding().catch(() => null);
+    if (!b?.bound || !b.root) {
+      new import_obsidian4.Notice(`Graphite: choose this vault's space first. "All my spaces" is a choice on a bound vault, and that space is where new spaces and captured lines go.`, 12e3);
+      return false;
+    }
+    const done = await this.bindVault(b.root.id, on);
+    return !!done && !!done.allSpaces === on;
+  }
   /** The Tasks modules the server would accept as this vault's inbox. */
   async fetchInboxChoices() {
-    if (this.onDevice) return [];
+    if (this.offServer) return [];
     const res = await (0, import_obsidian4.requestUrl)({ url: this.vaultUrl("/inboxes"), headers: this.headers, throw: false });
     if (res.status >= 400) return [];
     return res.json;
+  }
+  /** The Notes modules a page folder may be filed in: the server's list, the
+   *  ones the page door would accept. Empty when there is nothing to choose
+   *  from - not bound, offline, an older server - and the default still works. */
+  async fetchPageModuleChoices() {
+    if (this.offServer) return [];
+    try {
+      const res = await (0, import_obsidian4.requestUrl)({ url: this.vaultUrl("/page-modules"), headers: this.headers, throw: false });
+      if (res.status >= 400) return [];
+      return res.json;
+    } catch {
+      return [];
+    }
   }
   /** Choose (or clear) the capture inbox. */
   async setInbox(moduleId) {
@@ -6041,6 +6551,74 @@ ${block.join("\n")}`, { line, ch: old.length });
     }
     this.captureOn = !!moduleId;
     return true;
+  }
+  /** Set while a whole-account pull runs: each space's own "pulled" line gives
+   *  way to the one summary, so ten spaces are one notice and not ten. Notes
+   *  that were banked or let go still say so. */
+  quietPulls = 0;
+  mirroring = false;
+  /** 0.6.1 · LINKING IS ENOUGH. Pulls every space the key can read - the ones
+   *  the person owns and the ones shared with them, which is what
+   *  `GET /spaces` lists - into this vault, in the vault's layout.
+   *
+   *  `loud` is the person asking (the command, the settings button): it brings
+   *  in every space with no file here, offered before or not. Quiet is the
+   *  check that runs when Obsidian opens and when a key is tested: it brings
+   *  in the spaces this vault has not been offered, and only while
+   *  `mirrorAll` is on. A space is marked offered however its pull went, so a
+   *  refusal is said once and not retried at every check; the command is how
+   *  it is tried again.
+   *
+   *  The server's per-space "kept as .md files on the server" switch is a
+   *  different thing (the server writing a folder of its own) and is neither
+   *  read nor changed here: export.md and export.folder answer for any space
+   *  the key can read. */
+  async mirrorEverySpace(loud) {
+    if (this.offServer || !this.configured) return 0;
+    if (!loud && !this.settings.mirrorAll) return 0;
+    if (this.mirroring && !loud) return 0;
+    while (this.mirroring) await new Promise((r) => window.setTimeout(r, 50));
+    this.mirroring = true;
+    let brought = 0;
+    const failed = [];
+    try {
+      let spaces;
+      try {
+        spaces = await this.fetchSpaces();
+      } catch (e) {
+        if (loud) new import_obsidian4.Notice(`Graphite: could not list your spaces - ${e}`);
+        return 0;
+      }
+      const seen = new Set(this.settings.spacesSeen);
+      const todo = spaces.filter((sp) => this.entriesForSpace(sp.id).length === 0 && (loud || !seen.has(sp.id)));
+      this.quietPulls++;
+      try {
+        for (const sp of todo) {
+          await this.pullSpace(sp);
+          if (this.entriesForSpace(sp.id).length > 0) brought++;
+          else failed.push(sp.name);
+        }
+      } finally {
+        this.quietPulls--;
+      }
+      const next = /* @__PURE__ */ new Set([...seen, ...spaces.map((sp) => sp.id)]);
+      if (next.size !== seen.size) {
+        this.settings.spacesSeen = [...next];
+        await this.saveSettings();
+      }
+      if (brought) {
+        await this.fetchBinding().catch(() => null);
+        new import_obsidian4.Notice(`Graphite: brought in ${brought} space${brought === 1 ? "" : "s"} from your account.` + (this.vaultBound ? "" : " Edits go back to Graphite once you choose this vault's space in the plugin settings."), 12e3);
+      } else if (loud && !failed.length) {
+        new import_obsidian4.Notice(todo.length ? "Graphite: nothing new to bring in." : "Graphite: every space you can read is already in this vault.");
+      }
+      if (failed.length) {
+        new import_obsidian4.Notice(`Graphite: could not bring in ${failed.join(", ")}. "Bring in every space" tries again.`, 12e3);
+      }
+    } finally {
+      this.mirroring = false;
+    }
+    return brought;
   }
   async fetchSpaces() {
     const res = await (0, import_obsidian4.requestUrl)({ url: this.api("/spaces"), headers: this.headers });
@@ -6166,8 +6744,12 @@ ${block.join("\n")}`, { line, ch: old.length });
         data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
       } catch {
       }
-      if (!data.serverUrl) data.serverUrl = this.settings.serverUrl;
-      if (!data.token) data.token = this.settings.token;
+      if (this.onComputer) {
+        if (!data.serverUrl && !data.token) data.source = "computer";
+      } else {
+        if (!data.serverUrl) data.serverUrl = this.settings.serverUrl;
+        if (!data.token) data.token = this.settings.token;
+      }
       data.files = data.files ?? {};
       const layout = data.layout ?? this.settings.layout;
       data.layout = layout;
@@ -6195,15 +6777,19 @@ ${block.join("\n")}`, { line, ch: old.length });
       };
       let note;
       if (layout === "folder") {
-        const res = await (0, import_obsidian4.requestUrl)({
-          url: this.folderUrl(space.id),
-          headers: this.headers
-        });
-        const out = res.json;
+        const got = await this.folderExport(
+          data.files,
+          space,
+          void 0,
+          Object.values(data.files).find((e) => e.spaceId === space.id)?.folderAsked
+        );
+        if (!got) return;
+        const { out, asked } = got;
         fs.mkdirSync(p.join(dest.path, out.folder), { recursive: true });
         for (const f of out.files) {
           stamp(f.path, writeNote(f.path, f.markdown), {
             folder: out.folder,
+            ...asked ? { folderAsked: asked } : {},
             role: f.kind,
             moduleId: f.moduleId
           });
@@ -6211,7 +6797,7 @@ ${block.join("\n")}`, { line, ch: old.length });
         note = `pulled "${space.name}" into vault "${dest.name}" as a folder of ${out.files.length} notes`;
       } else {
         const md = await (0, import_obsidian4.requestUrl)({ url: this.exportUrl(space.id), headers: this.headers });
-        const fileName = `${space.name.replace(/[\\/:*?"<>|]/g, "_")}.md`;
+        const fileName = singleFileFor(data.files, space);
         stamp(fileName, writeNote(fileName, md.text), {});
         note = `pulled "${space.name}" into vault "${dest.name}"`;
       }
@@ -6248,9 +6834,43 @@ ${block.join("\n")}`, { line, ch: old.length });
   }
   /** R-379: the folder-layout twin of exportUrl — index + one note per
    *  module, as JSON with vault-relative paths. */
-  folderUrl(spaceId, moduleIds) {
-    const q = moduleIds?.length ? `?modules=${moduleIds.join(",")}` : "";
-    return this.api(`/spaces/${spaceId}/export.folder${q}`);
+  folderUrl(spaceId, moduleIds, folder) {
+    const q = [
+      moduleIds?.length ? `modules=${moduleIds.join(",")}` : "",
+      // FINDING 119: the folder this space was given when its own name was
+      // already another space's.
+      folder ? `folder=${encodeURIComponent(folder)}` : ""
+    ].filter(Boolean).join("&");
+    return this.api(`/spaces/${spaceId}/export.folder${q ? `?${q}` : ""}`);
+  }
+  /** FINDING 119: ONE SPACE, ONE FOLDER. The server names a space's folder
+   *  from the space's name, and two spaces may share a name ("Home" twice, a
+   *  household and a trip). Both landed in `Home/`: the second pull wrote over
+   *  the first space's notes and re-pointed their tracked paths at itself, so
+   *  the first could never be pushed back. The folder a space already has is
+   *  asked for again by name; a space new to the vault whose default folder
+   *  another space holds asks for its own, `Home (<end of its id>)`; and a
+   *  server that does not honour the ask is refused, never shared. Returns
+   *  the export to write, or null (said) when there is no free folder. */
+  async folderExport(files, space, moduleIds, own) {
+    const ask = async (folder) => (await (0, import_obsidian4.requestUrl)({
+      url: this.folderUrl(space.id, moduleIds, folder),
+      headers: this.headers
+    })).json;
+    let out = await ask(own);
+    let asked = own;
+    if (!own && folderHeldByAnother(files, out.folder, space.id)) {
+      asked = distinctFolder(out.folder, space.id);
+      out = await ask(asked);
+    }
+    if (folderHeldByAnother(files, out.folder, space.id)) {
+      new import_obsidian4.Notice(
+        `Graphite: another space in this vault already syncs into "${out.folder}/", so "${space.name}" was not pulled \u2014 it would have written over those notes. Rename one of the two spaces in Graphite, then pull again.`,
+        12e3
+      );
+      return null;
+    }
+    return { out, asked };
   }
   /** Every tracked file belonging to one space, with its path. */
   entriesForSpace(spaceId) {
@@ -6262,7 +6882,7 @@ ${block.join("\n")}`, { line, ch: old.length });
     if (this.settings.layout === "folder") {
       return this.pullFolder(space, moduleIds, moduleCount);
     }
-    const fileName = `${space.name.replace(/[\\/:*?"<>|]/g, "_")}.md`;
+    const fileName = singleFileFor(this.settings.files, space);
     const prev = this.settings.files[fileName];
     const effective = moduleIds === void 0 ? prev?.moduleIds : moduleIds === null ? void 0 : moduleIds;
     try {
@@ -6301,7 +6921,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
-      new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope}.`);
+      if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
       new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${e}`);
     }
@@ -6327,11 +6947,14 @@ ${block.join("\n")}`, { line, ch: old.length });
     const stored = previous.find((p) => p.entry.moduleIds)?.entry.moduleIds;
     const effective = moduleIds === void 0 ? stored : moduleIds === null ? void 0 : moduleIds;
     try {
-      const res = await (0, import_obsidian4.requestUrl)({
-        url: this.folderUrl(space.id, effective),
-        headers: this.headers
-      });
-      const out = res.json;
+      const got = await this.folderExport(
+        this.settings.files,
+        space,
+        effective,
+        previous.find((p) => p.entry.folderAsked)?.entry.folderAsked
+      );
+      if (!got) return;
+      const { out, asked } = got;
       const written = /* @__PURE__ */ new Set();
       const renamed = /* @__PURE__ */ new Set();
       const banked = [];
@@ -6339,7 +6962,8 @@ ${block.join("\n")}`, { line, ch: old.length });
       try {
         await this.ensureFolder(out.folder);
         for (const f of out.files) {
-          const was = previous.find((p) => p.path !== f.path && (f.kind === "module" ? p.entry.moduleId === f.moduleId : p.entry.role === "index"));
+          await this.ensureDirs(f.path);
+          const was = previous.find((p) => p.path !== f.path && (f.kind === "page" ? p.entry.role === "page" && p.entry.noteId === f.noteId : f.kind === "module" ? p.entry.role !== "page" && p.entry.moduleId === f.moduleId : p.entry.role === "index"));
           if (was) {
             await this.renameTo(was.path, f.path);
             renamed.add(was.path);
@@ -6357,8 +6981,10 @@ ${block.join("\n")}`, { line, ch: old.length });
             spaceId: space.id,
             spaceName: space.name,
             folder: out.folder,
+            ...asked ? { folderAsked: asked } : {},
             role: f.kind,
             moduleId: f.moduleId,
+            ...f.kind === "page" ? { noteId: f.noteId, pageDir: notebookDirOf(f.path, f.markdown) } : {},
             lastSyncAt: Date.now(),
             lastHash: hash(text),
             moduleIds: effective,
@@ -6370,15 +6996,41 @@ ${block.join("\n")}`, { line, ch: old.length });
       } finally {
         this.writingBack--;
       }
-      const dropped = previous.filter((p) => !written.has(p.path) && !renamed.has(p.path));
-      for (const d of dropped) {
+      const gone = previous.filter((p) => !written.has(p.path) && !renamed.has(p.path));
+      const trashed = [];
+      const dropped = [];
+      this.writingBack++;
+      try {
+        for (const d of gone) {
+          const f = d.entry.role === "page" ? this.app.vault.getAbstractFileByPath(d.path) : null;
+          const inScope = !effective?.length || d.entry.moduleId !== void 0 && effective.includes(d.entry.moduleId);
+          if (f instanceof import_obsidian4.TFile && inScope && hash(await this.app.vault.read(f)) === d.entry.lastHash) {
+            try {
+              await this.trashFile(f);
+              trashed.push(d.path);
+              continue;
+            } catch {
+            }
+          }
+          dropped.push(d);
+        }
+      } finally {
+        this.writingBack--;
+      }
+      for (const d of gone) {
         delete this.settings.files[d.path];
         delete this.settings.bases[d.path];
       }
       await this.saveSettings();
       this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
-      new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ \u2014 ${out.files.length} note${out.files.length === 1 ? "" : "s"}.`);
+      if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ \u2014 ${out.files.length} note${out.files.length === 1 ? "" : "s"}.`);
+      if (trashed.length) {
+        new import_obsidian4.Notice(
+          `Graphite: ${trashed.length} page${trashed.length === 1 ? " was" : "s were"} removed in Graphite, so ${trashed.length === 1 ? "its file was" : "their files were"} moved to the trash: ${trashed.join(", ")}. Graphite keeps ${trashed.length === 1 ? "it" : "them"} in its Bin.`,
+          12e3
+        );
+      }
       if (dropped.length) {
         new import_obsidian4.Notice(
           `Graphite: ${dropped.length} note${dropped.length === 1 ? "" : "s"} no longer belong${dropped.length === 1 ? "s" : ""} to "${space.name}" and ${dropped.length === 1 ? "is" : "are"} no longer synced \u2014 ${dropped.map((d) => d.path).join(", ")}. Nothing was deleted; remove them yourself when you are happy.`,
@@ -6394,6 +7046,121 @@ ${block.join("\n")}`, { line, ch: old.length });
     } catch (e) {
       new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${e}`);
     }
+  }
+  /** Obsidian's own trash, as the vault is set to use it (the file manager's),
+   *  or the vault's .trash on an Obsidian that has no such call. */
+  async trashFile(file) {
+    const fm = this.app.fileManager;
+    if (typeof fm.trashFile === "function") await fm.trashFile(file);
+    else await this.app.vault.trash(file, false);
+  }
+  /** Page files deleted in this burst, by path. */
+  vanished = /* @__PURE__ */ new Set();
+  vanishTimer = 0;
+  /** This many page files gone at once is not a person deleting pages: it is a
+   *  folder moved, a sync client part-way through, or a drive not mounted. */
+  static MASS_DELETE = 5;
+  /** R-8336: A PAGE'S FILE WAS DELETED. With auto-push on, the page is deleted
+   *  in Graphite a moment later (its Bin keeps it); with it off, the panel
+   *  shows the file missing and offers Delete page. Gathered over a second and
+   *  a half so a burst can be judged as a burst. */
+  pageVanished(path) {
+    this.vanished.add(path);
+    window.clearTimeout(this.vanishTimer);
+    this.vanishTimer = window.setTimeout(() => {
+      const paths = [...this.vanished];
+      this.vanished.clear();
+      if (paths.length >= _GraphitePlugin.MASS_DELETE) {
+        new import_obsidian4.Notice(
+          `Graphite: ${paths.length} page files disappeared at once, so none were deleted in Graphite. Pull to put them back, or delete the pages you mean in the sync panel.`,
+          12e3
+        );
+        return;
+      }
+      if (this.settings.autoPush) for (const p of paths) void this.pushFile(p, { auto: true });
+      this.refreshPanel();
+    }, 1500);
+  }
+  /** The deletion a missing page file stands for: the app's ordinary delete,
+   *  not forced, so a page other things link to is refused by the same rule the
+   *  app keeps and its file comes back on the next Pull. */
+  async deleteGonePage(path, entry, opts) {
+    if (!entry.moduleId || !entry.noteId) return;
+    if (!await this.writeAllowed("deleted", !opts?.auto)) return;
+    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
+    const title = path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+    const dir = entry.pageDir ?? "";
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (!dir || !f.path.startsWith(`${dir}/`) || this.settings.files[f.path]) continue;
+      if (pageIdOf(await this.app.vault.read(f)) === entry.noteId) {
+        await this.pageRenamed(path, f.path);
+        return;
+      }
+    }
+    const res = await (0, import_obsidian4.requestUrl)({
+      url: this.api(`/modules/${entry.moduleId}/notes/${entry.noteId}`),
+      method: "DELETE",
+      headers: this.headers,
+      throw: false
+    });
+    if (this.onComputer) this.computerReadOnly = res.status === 403;
+    if (res.status < 300 || res.status === 404) {
+      delete this.settings.files[path];
+      delete this.settings.bases[path];
+      await this.saveSettings();
+      this.refreshPanel();
+      new import_obsidian4.Notice(res.status === 404 ? `Graphite: "${title}" was already gone from Graphite.` : `Graphite: deleted "${title}" in Graphite - it is in the Bin there.`);
+    } else if (res.status === 409) {
+      new import_obsidian4.Notice(
+        `Graphite: "${title}" is linked from other things, so it stays in Graphite. Pull to put its file back, or erase it in the app if you mean it.`,
+        12e3
+      );
+    } else {
+      new import_obsidian4.Notice(`Graphite: could not delete "${title}" (${res.status}) - ${res.json?.message ?? "see the app"}. Nothing was changed.`, 12e3);
+    }
+  }
+  /** Every folder on the way to [path], outermost first (R-8336: a page sits two
+   *  or three folders deep, and createFolder makes one level). */
+  async ensureDirs(path) {
+    let at = "";
+    for (const part of path.split("/").slice(0, -1)) {
+      at = at ? `${at}/${part}` : part;
+      await this.ensureFolder(at);
+    }
+  }
+  /** R-8336: A PAGE'S FILE WAS RENAMED OR MOVED IN THE VAULT. The file name is
+   *  the page's title and its folder is its section, so this is the person
+   *  renaming the page or moving it between sections: the two lines of the
+   *  file that say so are rewritten to match, the tracking follows the file
+   *  (it would otherwise be left pointing at a path nothing is at), and the
+   *  page is pushed like any edit. Obsidian has already rewritten the links to
+   *  it in the vault's other files; Graphite rewrites its own on the title
+   *  change. Not the plugin's own renames (a pull moving a page that was
+   *  renamed in Graphite), which come through with writingBack up. */
+  async pageRenamed(from, to) {
+    const entry = this.settings.files[from];
+    if (!entry || entry.role !== "page" || this.settings.files[to]) return;
+    const file = this.app.vault.getAbstractFileByPath(to);
+    if (!(file instanceof import_obsidian4.TFile) || file.extension !== "md") return;
+    const text = await this.app.vault.read(file);
+    if (pageIdOf(text) !== entry.noteId) return;
+    this.settings.files[to] = { ...entry };
+    delete this.settings.files[from];
+    const base = this.settings.bases[from];
+    delete this.settings.bases[from];
+    if (base !== void 0) putBase(this.settings.bases, to, base);
+    const change = pageRenameOf(from, to, entry.pageDir ?? "");
+    if (change) {
+      this.writingBack++;
+      try {
+        await this.app.vault.process(file, (cur) => setPageFields(cur, change));
+      } finally {
+        this.writingBack--;
+      }
+      if (this.settings.autoPush) this.schedulePush(to);
+    }
+    await this.saveSettings();
+    this.refreshPanel();
   }
   async ensureFolder(folder) {
     if (this.app.vault.getAbstractFileByPath(folder)) return;
@@ -6423,12 +7190,48 @@ ${block.join("\n")}`, { line, ch: old.length });
     }
     await this.pushFile(file.path);
   }
+  /** An auto-push of [path] about 2.5 seconds after the last edit. */
+  schedulePush(path) {
+    window.clearTimeout(this.pushTimers[path]);
+    this.pushTimers[path] = window.setTimeout(
+      () => void this.pushFile(path, { auto: true }),
+      2500
+    );
+  }
+  /** FINDING 120: ONE PUSH PER NOTE AT A TIME. Every way into a push comes
+   *  through here (the command, the panel button, the sweep, the auto-push
+   *  timer, the conflict dialog), so the guard sits on the door and not on
+   *  each caller. A push asked for while one is running is not dropped — the
+   *  edits it was asked about may have come after the first read the file —
+   *  it runs once more when the first is done. */
   async pushFile(path, opts) {
+    if (this.pushing.has(path)) {
+      this.pushAgain.set(path, opts);
+      return;
+    }
+    this.pushing.set(path, true);
+    try {
+      await this.pushFileNow(path, opts);
+    } finally {
+      this.pushing.delete(path);
+    }
+    if (this.pushAgain.has(path)) {
+      const again = this.pushAgain.get(path);
+      this.pushAgain.delete(path);
+      await this.pushFile(path, again);
+    }
+  }
+  async pushFileNow(path, opts) {
     if (this.onDevice) return;
     const entry = this.settings.files[path];
     const file = this.app.vault.getAbstractFileByPath(path);
+    if (entry?.role === "page" && !(file instanceof import_obsidian4.TFile)) {
+      await this.deleteGonePage(path, entry, opts);
+      return;
+    }
     if (!entry || !(file instanceof import_obsidian4.TFile)) return;
     if (!await this.writeAllowed("pushed", !opts?.auto)) return;
+    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
     if (!opts?.force && this.settings.bases[path] === void 0) {
       const state = await this.serverState(path);
       if (state === "server-changed") {
@@ -6466,10 +7269,11 @@ ${block.join("\n")}`, { line, ch: old.length });
       });
       let res = await send("update_existing");
       let addOnly = false;
-      if (res.status === 403) {
+      if (res.status === 403 && !this.onComputer) {
         res = await send("merge");
         addOnly = res.status < 400;
       }
+      if (this.onComputer) this.computerReadOnly = res.status === 403;
       if (res.status >= 400) {
         new import_obsidian4.Notice(`Graphite: push refused (${res.status}) \u2014 ${res.json?.message ?? "see the app"}. Nothing was changed.`);
         return;
@@ -6507,9 +7311,15 @@ ${bullets(said)}`, 15e3);
         return;
       }
       const text = keepFreeform(markdown, fresh);
+      let kept = false;
       this.writingBack++;
       try {
-        await this.app.vault.modify(file, text);
+        await this.app.vault.process(file, (current) => {
+          if (current === markdown || current === text) return text;
+          kept = true;
+          const merged = mergeLines(markdown, current, text, { adjacent: true });
+          return merged.clean ? merged.text : carryIds(markdown, current, text);
+        });
       } finally {
         this.writingBack--;
       }
@@ -6518,7 +7328,14 @@ ${bullets(said)}`, 15e3);
       putBase(this.settings.bases, path, text);
       await this.saveSettings();
       this.refreshPanel();
-      new import_obsidian4.Notice(`Graphite: pushed "${entry.spaceName ?? path}" and canonicalized.`);
+      if (kept) {
+        if (this.settings.autoPush) this.schedulePush(path);
+        new import_obsidian4.Notice(
+          `Graphite: pushed "${entry.spaceName ?? path}". You kept typing while it was pushed, so your note was left as you have it${this.settings.autoPush ? " and will be pushed again" : " \u2014 push again to send the newer edits"}.`
+        );
+      } else {
+        new import_obsidian4.Notice(`Graphite: pushed "${entry.spaceName ?? path}" and canonicalized.`);
+      }
     } catch (e) {
       new import_obsidian4.Notice(`Graphite: push failed \u2014 ${e}`);
     }
@@ -6535,11 +7352,11 @@ ${bullets(said)}`, 15e3);
     }
     const scope = entry.moduleIds;
     const res = await (0, import_obsidian4.requestUrl)({
-      url: this.folderUrl(entry.spaceId, scope),
+      url: this.folderUrl(entry.spaceId, scope, entry.folderAsked),
       headers: this.headers
     });
     const out = res.json;
-    const match = entry.role === "index" ? out.files.find((f) => f.kind === "index") : out.files.find((f) => f.moduleId === entry.moduleId);
+    const match = entry.role === "index" ? out.files.find((f) => f.kind === "index") : entry.role === "page" ? out.files.find((f) => f.kind === "page" && f.noteId === entry.noteId) : out.files.find((f) => f.kind !== "page" && f.moduleId === entry.moduleId);
     return match?.markdown ?? null;
   }
   /** Local state of a tracked file, no network involved. */
@@ -6585,16 +7402,36 @@ ${bullets(said)}`, 15e3);
   /** R-399: never destroy vault writing. Before the canonical text replaces
    *  a both-moved note, the user's version is copied BESIDE it — an ordinary
    *  untracked file the user merges from and deletes when done. Banking is
-   *  the floor, not the ceremony: the pull itself stays one action. */
+   *  the floor, not the ceremony: the pull itself stays one action.
+   *
+   *  FINDING 118: THE NAME NEVER STANDS FOR TWO VERSIONS, AND A FAILURE IS NOT
+   *  "ALREADY BANKED". The copy was named to the minute and every create error
+   *  was read as "this exact version is already there", so a second, different
+   *  version in the same minute was not written, the pull overwrote the note,
+   *  and the notice still named the first copy. A name that is taken holds
+   *  this very text (then it is the copy) or another version (then the next
+   *  numbered name is tried, the way note sync names its own conflict copies);
+   *  a create that fails for any other reason throws, so the pull stops
+   *  before it overwrites the note. */
   async bankConflictCopy(path, old) {
-    const stamp = (/* @__PURE__ */ new Date()).toISOString().slice(0, 16).replace("T", " ").replace(":", "h");
-    const dot = path.toLowerCase().lastIndexOf(".md");
-    const bankPath = dot === -1 ? `${path} (conflict ${stamp}).md` : `${path.slice(0, dot)} (conflict ${stamp}).md`;
-    try {
-      await this.app.vault.create(bankPath, old);
-    } catch {
+    const skip = /* @__PURE__ */ new Set();
+    for (let tries = 0; tries < 100; tries++) {
+      const bankPath = conflictCopyPath(path, /* @__PURE__ */ new Date(), (p) => skip.has(p));
+      const there = this.app.vault.getAbstractFileByPath(bankPath);
+      if (there instanceof import_obsidian4.TFile) {
+        if (await this.app.vault.read(there) === old) return bankPath;
+        skip.add(bankPath);
+        continue;
+      }
+      try {
+        await this.app.vault.create(bankPath, old);
+        return bankPath;
+      } catch (e) {
+        if (this.app.vault.getAbstractFileByPath(bankPath)) continue;
+        throw new Error(`could not keep a copy of "${path}" beside it (${e}) \u2014 nothing was overwritten`);
+      }
     }
-    return bankPath;
+    throw new Error(`could not find a free name for a copy of "${path}" \u2014 nothing was overwritten`);
   }
   /** R-379: push every note of a space, index last — the index carries no
    *  records, so it is the cheapest one to land after the module notes have
@@ -6668,6 +7505,19 @@ ${bullets(said)}`, 15e3);
     this.settings = { ...DEFAULTS, ...data };
     this.settings.routeCache = Array.isArray(data.routeCache) ? data.routeCache : [];
     this.settings.routeRecent = Array.isArray(data.routeRecent) ? data.routeRecent : [];
+    this.settings.spacesSeen = Array.isArray(data.spacesSeen) ? data.spacesSeen.filter((x) => typeof x === "string") : [];
+    if (typeof data.mirrorAll !== "boolean") {
+      this.settings.mirrorAll = Object.keys(this.settings.files ?? {}).length === 0;
+    }
+    this.settings.pageModules = {};
+    if (data.pageModules && typeof data.pageModules === "object") {
+      for (const [k, v] of Object.entries(data.pageModules)) {
+        if (typeof v === "string" && v) this.settings.pageModules[k] = v;
+      }
+    }
+    if (typeof data.pagesOn !== "boolean") {
+      this.settings.pagesOn = parseFolders(String(data.pageFolders ?? "")).length > 0;
+    }
     this.settings.bases = {};
     if (data.bases && typeof data.bases === "object") {
       for (const [k, v] of Object.entries(data.bases)) {
@@ -6921,6 +7771,7 @@ var LpSyncView = class extends import_obsidian4.ItemView {
     conn.createEl("div", { text: onDevice ? "THIS DEVICE" : "CONNECTION", cls: "gr-sync-label" });
     const me = this.plugin.lastMe;
     const health = this.plugin.lastHealth;
+    const onComputer = this.plugin.onComputer;
     if (onDevice) {
       const look = this.plugin.mirrorLook;
       if (!look) {
@@ -6941,16 +7792,16 @@ var LpSyncView = class extends import_obsidian4.ItemView {
       }
     } else if (!this.plugin.configured) {
       conn.createDiv({
-        text: "Not configured \u2014 set the server URL and API token in the plugin settings.",
+        text: onComputer ? this.plugin.notConfigured().long : "Not configured \u2014 set the server URL and API token in the plugin settings.",
         cls: "gr-sync-bad"
       });
     } else if (me) {
       conn.createDiv({
-        text: `\u{1F7E2} Connected as ${me.name ?? me.email} \xB7 ${this.plugin.settings.serverUrl}`
+        text: onComputer ? "\u{1F7E2} Connected to the Graphite app on this computer" : `\u{1F7E2} Connected as ${me.name ?? me.email} \xB7 ${this.plugin.settings.serverUrl}`
       });
       const when = this.plugin.lastCheck ? ` \xB7 checked ${clock(this.plugin.lastCheck.at)}` : "";
       conn.createDiv({
-        text: `Server version ${health?.version ?? "unknown"}${when}`,
+        text: `${onComputer ? "Graphite app version" : "Server version"} ${health?.version ?? "unknown"}${when}`,
         cls: "gr-sync-dim"
       });
       const outdated = this.plugin.outdatedNote();
@@ -6967,8 +7818,13 @@ var LpSyncView = class extends import_obsidian4.ItemView {
         });
       }
     } else {
-      conn.createDiv({ text: `\u{1F534} Not connected \xB7 ${this.plugin.settings.serverUrl}`, cls: "gr-sync-bad" });
-      conn.createDiv({ text: "Use Refresh (or fix the token in settings).", cls: "gr-sync-dim" });
+      if (onComputer) {
+        conn.createDiv({ text: `\u{1F534} ${this.plugin.lastCheck?.detail ?? "Not connected"} \xB7 this computer`, cls: "gr-sync-bad" });
+        conn.createDiv({ text: "Use Refresh once the Graphite app is open.", cls: "gr-sync-dim" });
+      } else {
+        conn.createDiv({ text: `\u{1F534} Not connected \xB7 ${this.plugin.settings.serverUrl}`, cls: "gr-sync-bad" });
+        conn.createDiv({ text: "Use Refresh (or fix the token in settings).", cls: "gr-sync-dim" });
+      }
     }
     if (onDevice) {
       const how2 = el.createDiv({ cls: "gr-sync-section" });
@@ -7054,7 +7910,13 @@ var LpSyncView = class extends import_obsidian4.ItemView {
           );
           stateEl.addClass(`gr-state-${s}`);
         });
-        line.createEl("button", { text: "Push" }).addEventListener("click", () => void this.plugin.pushFile(path));
+        const pushBtn = line.createEl("button", { text: "Push" });
+        pushBtn.addEventListener("click", () => void this.plugin.pushFile(path));
+        if (entry.role === "page") {
+          void this.plugin.fileState(path).then((s) => {
+            if (s === "missing") pushBtn.setText("Delete page");
+          });
+        }
         line.createEl("button", { text: "Check" }).addEventListener("click", () => void this.plugin.serverState(path).then((s) => {
           new import_obsidian4.Notice(
             s === "server-changed" ? "Server has NEW changes since your last sync \u2014 Pull to get them." : s === "server-unchanged" ? "Server matches your last sync." : "Could not reach the server."
@@ -7094,15 +7956,25 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     const onDevice = this.plugin.onDevice;
-    new import_obsidian4.Setting(containerEl).setName("Where Graphite is").setDesc('A server, or the Graphite app on this device. "This device" needs no server and no account: the Graphite app writes your spaces into this vault as notes whenever it is opened, and takes in what you changed here the next time it is opened. Nothing runs in the background, so a change you make here waits for that. In Graphite, choose this vault in Settings, Data and server, Data locations.').addDropdown((d) => d.addOption("server", "Server").addOption("device", "This device").setValue(this.plugin.settings.source).onChange(async (v) => {
-      this.plugin.settings.source = v === "device" ? "device" : "server";
+    const onComputer = this.plugin.onComputer;
+    new import_obsidian4.Setting(containerEl).setName("Where Graphite is").setDesc('A server, or the Graphite app on this device or computer. "This computer" reads the spaces the app holds, with no server and no account: it needs Obsidian on a desktop and the Graphite app open on the same computer, with "Let the notes plugin read Graphite on this computer" turned on in its Settings, Data and server (a phone cannot; use Server). "This device" needs no server and no account: the Graphite app writes your spaces into this vault as notes whenever it is opened, and takes in what you changed here the next time it is opened. Nothing runs in the background, so a change you make here waits for that. In Graphite, choose this vault in Settings, Data and server, Data locations.').addDropdown((d) => d.addOption("server", "Server").addOption("device", "This device").addOption("computer", "This computer").setValue(this.plugin.settings.source).onChange(async (v) => {
+      if (v === "computer" && !import_obsidian4.Platform.isDesktopApp) {
+        new import_obsidian4.Notice(`Graphite: ${doorSentence("phone")}`, 1e4);
+        this.plugin.settings.source = "server";
+      } else {
+        this.plugin.settings.source = v === "device" ? "device" : v === "computer" ? "computer" : "server";
+      }
       await this.plugin.saveSettings();
+      this.plugin.computerReadOnly = false;
       await this.plugin.checkConnection(false);
       this.display();
     }));
     if (onDevice) {
       const look = this.plugin.mirrorLook;
       new import_obsidian4.Setting(containerEl).setName("This device").setDesc(look ? mirrorSentence(look, Date.now(), import_obsidian4.Platform.isMobile) : "Looking in this vault for the notes the Graphite app wrote.");
+    } else if (onComputer) {
+      const look = this.plugin.doorLook(true);
+      new import_obsidian4.Setting(containerEl).setName("This computer").setDesc(look.ok ? "Found the Graphite app on this computer. There is no address or token to enter: the app leaves them where this plugin reads them, and they change each time the app starts." : doorSentence(look.why));
     } else {
       new import_obsidian4.Setting(containerEl).setName("Server URL").setDesc("The Graphite server your account is on, e.g. https://graphite.example.com. Only spaces kept on a server can be pulled from it. To read spaces kept on your devices, or shared between them through the relay, choose This device above.").addText((t) => t.setPlaceholder("https://graphite.example.com").setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
         this.plugin.settings.serverUrl = v.trim();
@@ -7113,9 +7985,17 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         await this.plugin.saveSettings();
       }));
     }
-    new import_obsidian4.Setting(containerEl).setName("Connection").setDesc(onDevice ? "Looks in this vault for the notes the Graphite app wrote, and says what changed here since." : "Verifies the URL + token against the server and shows who you are signed in as.").addButton((b) => b.setButtonText(onDevice ? "Look again" : "Test connection").setCta().onClick(async () => {
+    new import_obsidian4.Setting(containerEl).setName("Connection").setDesc(onDevice ? "Looks in this vault for the notes the Graphite app wrote, and says what changed here since." : onComputer ? "Looks for the Graphite app on this computer and asks it who it is." : "Verifies the URL + token against the server and shows who you are signed in as.").addButton((b) => b.setButtonText(onDevice ? "Look again" : "Test connection").setCta().onClick(async () => {
       if (await this.plugin.checkConnection(true) && !onDevice) this.display();
     }));
+    if (!onDevice && !onComputer) {
+      new import_obsidian4.Setting(containerEl).setName("Bring in every space").setDesc("Once the key is linked, every space you can read is pulled into this vault, and a space made later arrives the next time Obsidian opens. This only writes files here. Edits go back to Graphite when you push them (or with Auto-push below), into the space this vault is bound to.").addToggle((t) => t.setValue(this.plugin.settings.mirrorAll).onChange(async (v) => {
+        this.plugin.settings.mirrorAll = v;
+        await this.plugin.saveSettings();
+      })).addButton((b) => b.setButtonText("Bring in now").onClick(async () => {
+        if (await this.plugin.checkConnection(true)) await this.plugin.mirrorEverySpace(true);
+      }));
+    }
     if (!onDevice) {
       new import_obsidian4.Setting(containerEl).setName("Vault layout").setDesc(`How a pulled space lands here. "Folder per space" writes an index note plus one note per module, linked to each other and carrying the module's own tags \u2014 so a module is a note you can open, link and embed on its own. Existing files keep the layout they were pulled with until you pull them again.`).addDropdown((d) => d.addOption("folder", "Folder per space (one note per module)").addOption("single", "One file per space").setValue(this.plugin.settings.layout).onChange(async (v) => {
         this.plugin.settings.layout = v === "folder" ? "folder" : "single";
@@ -7134,11 +8014,11 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         this.plugin.refreshPanel();
       }));
     }
-    if (onDevice) {
-      new import_obsidian4.Setting(containerEl).setName("Capture, binding and census").setDesc("These need a Graphite server, so they are off while Graphite is read from this device. Choose Server above to use them.");
+    if (onDevice || onComputer) {
+      new import_obsidian4.Setting(containerEl).setName("Capture, binding and census").setDesc("These need a Graphite server, so they are off while Graphite is read from this " + (onComputer ? "computer" : "device") + ". Choose Server above to use them.");
     } else {
       const binding = this.plugin.fetchBinding().catch(() => null);
-      new import_obsidian4.Setting(containerEl).setName("This vault's space").setDesc("Everything this vault writes to Graphite lands in this space or a space nested inside it \u2014 or nowhere: a note that names a space outside it is refused, and the refusal says which. Nothing is written until a space is chosen.").addDropdown((d) => {
+      new import_obsidian4.Setting(containerEl).setName("This vault's space").setDesc("Everything this vault writes to Graphite lands in this space or a space nested inside it \u2014 or nowhere: a note that names a space outside it is refused, and the refusal says which (unless All my spaces, below, is on). Nothing is written until a space is chosen. New spaces and captured lines go here.").addDropdown((d) => {
         d.addOption("", "Not bound \u2014 this vault writes nothing");
         d.setValue("");
         d.onChange(async (v) => {
@@ -7150,6 +8030,13 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
           d.setValue(b?.bound && b.root ? b.root.id : "");
         }).catch(() => {
         });
+      });
+      new import_obsidian4.Setting(containerEl).setName("All my spaces").setDesc("Off: this vault writes only into its space and the spaces inside it. On: your edits go back to every space you are allowed to write in, and Graphite still checks each one. Needs a space chosen above.").addToggle((t) => {
+        t.setValue(false);
+        t.onChange(async (v) => {
+          if (!await this.plugin.setAllSpaces(v)) this.display();
+        });
+        void binding.then((b) => t.setValue(!!(b?.bound && b.allSpaces))).catch(() => void 0);
       });
       new import_obsidian4.Setting(containerEl).setName("Capture inbox").setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds in any note that is not a synced one. The line is marked afterwards, so capturing again never makes it twice. Choose the space this vault is bound to first.').addDropdown((d) => {
         d.addOption("", "Off");
@@ -7179,10 +8066,18 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         this.plugin.settings.autoCapture = v;
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("Folders whose notes become pages").setDesc("Comma-separated, e.g. Meetings. Every note in these folders is sent to Graphite whole, a minute after it stops changing, and shown there as a page with the tasks captured from it. Empty by default: nothing is sent. A note with a routing heading (## Weekly >> Space) is a page whatever this says. Needs the capture inbox above.").addText((t) => t.setPlaceholder("Meetings").setValue(this.plugin.settings.pageFolders).onChange(async (v) => {
-        this.plugin.settings.pageFolders = v;
+      new import_obsidian4.Setting(containerEl).setName("Send notes to Graphite as pages").setDesc("Off by default. When on, a note in one of the folders below, or one with a routing heading (## Weekly >> Space), is sent to Graphite whole a minute after it stops changing and shown there as a read-only page with the tasks captured from it. This vault must be bound to a space, above; no capture inbox is needed.").addToggle((t) => t.setValue(this.plugin.settings.pagesOn).onChange(async (v) => {
+        this.plugin.settings.pagesOn = v;
         await this.plugin.saveSettings();
       }));
+      new import_obsidian4.Setting(containerEl).setName("Folders whose notes become pages").setDesc("Comma-separated, e.g. Meetings. Every note in these folders is a page, while the switch above is on. Empty by default. A note with a routing heading is a page whatever this says. Pick the Notes module for each folder below.").addText((t) => t.setPlaceholder("Meetings").setValue(this.plugin.settings.pageFolders).onChange(async (v) => {
+        this.plugin.settings.pageFolders = v;
+        await this.plugin.saveSettings();
+        this.drawPageModules();
+      }));
+      this.pageRows = containerEl.createDiv();
+      this.pageModuleList = this.plugin.fetchPageModuleChoices();
+      this.drawPageModules();
       const sent = this.plugin.censusState;
       new import_obsidian4.Setting(containerEl).setName("Send a vault census to the morning sweep").setDesc("Off by default. When on, Graphite is sent \u2014 for each note with an unticked to-do nobody filed, or dated in the last week \u2014 its path, its date, how many task lines it holds in each state, its tags and its links. Never a word of the note. The sweep uses it to find to-dos nobody filed and meetings with no note; without it, the sweep says it could not look at the vault." + (sent === "failed" ? " The last census could not be sent." : sent === "too-big" ? " The last census was too large to send." : sent ? ` Last sent with ${sent.notes} note${sent.notes === 1 ? "" : "s"}.` : "")).addToggle((t) => t.setValue(this.plugin.settings.censusOn).onChange(async (v) => {
         this.plugin.settings.censusOn = v;
@@ -7292,8 +8187,9 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
   drawServers(el) {
     el.empty();
     const list = this.plugin.serversOnThisMachine();
-    if (this.plugin.onDevice) {
-      new import_obsidian4.Setting(el).setName("Graphite on this device").setDesc(this.plugin.lastCheck?.detail ?? "Not looked at yet.").addButton((b) => b.setButtonText("Check").onClick(async () => {
+    if (this.plugin.offServer) {
+      const here = this.plugin.onComputer;
+      new import_obsidian4.Setting(el).setName(here ? "Graphite on this computer" : "Graphite on this device").setDesc(here ? `The Graphite app on this computer, no server. ${serverCheckText(this.plugin.lastCheck)}` : this.plugin.lastCheck?.detail ?? "Not looked at yet.").addButton((b) => b.setButtonText("Check").onClick(async () => {
         await this.plugin.checkConnection(false);
         this.drawServers(el);
       }));
@@ -7317,8 +8213,8 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
   drawDevices(el, phase) {
     el.empty();
     const p = this.plugin;
-    if (p.onDevice) {
-      new import_obsidian4.Setting(el).setName("Devices").setDesc("The Graphite app on this device has no account to sign in to, so there are no sign-ins to list.");
+    if (p.offServer) {
+      new import_obsidian4.Setting(el).setName("Devices").setDesc(`The Graphite app on this ${p.onComputer ? "computer" : "device"} has no account to sign in to, so there are no sign-ins to list.`);
       return;
     }
     if (!p.settings.serverUrl || !p.settings.token) {
@@ -7341,6 +8237,43 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
       const since = d.createdAt ? ` \xB7 since ${new Date(d.createdAt).toLocaleDateString()}` : "";
       new import_obsidian4.Setting(el).setName(`${deviceName(d.userAgent)}${d.current ? " \u2014 this vault's token" : ""}`).setDesc(`${lastSeenText(d, now)}${since}`);
     }
+  }
+  /** NOTE PAGES: the rows of Notes-module choices, one per listed page folder. */
+  pageRows;
+  pageModuleList = Promise.resolve([]);
+  /** Settles when the module choices have been drawn into the rows. */
+  pageModuleChoices = null;
+  /** Draw (or redraw) the module row of each listed page folder. The rows draw
+   *  at once with the default, and the choices arrive after, as the capture
+   *  inbox's do, so the tab opens offline. */
+  drawPageModules() {
+    const rows = this.pageRows;
+    rows.empty();
+    const modules = this.plugin.settings.pageModules;
+    const pending = [];
+    for (const folder of parseFolders(this.plugin.settings.pageFolders)) {
+      new import_obsidian4.Setting(rows).setName(`Notes module for ${folder}`).setDesc("Where pages from this folder are filed. Pages already sent move when you change it.").addDropdown((d) => {
+        d.addOption("", "First Notes module of the space (default)");
+        d.setValue(modules[folder] ?? "");
+        d.onChange(async (v) => {
+          if (v) modules[folder] = v;
+          else delete modules[folder];
+          await this.plugin.saveSettings();
+        });
+        pending.push((list) => {
+          for (const m of list) d.addOption(m.id, m.label);
+          const chosen = modules[folder];
+          if (chosen && !list.some((m) => m.id === chosen)) {
+            d.addOption(chosen, "A module that is no longer available");
+          }
+          d.setValue(chosen ?? "");
+        });
+      });
+    }
+    this.pageModuleChoices = this.pageModuleList.then((list) => {
+      for (const fill of pending) fill(list);
+    }).catch(() => {
+    });
   }
   /** The capture inbox's choices, once the server has answered. */
   inboxChoices = null;

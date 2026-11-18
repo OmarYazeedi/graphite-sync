@@ -94,7 +94,13 @@ export function parseVaultTags(text: string): { text: string; tags: string[] } {
     })
     // Two spaces where a tag used to be is not a sentence somebody wrote.
     .replace(/\s{2,}/g, ' ')
-    .trim();
+    .trim()
+    // SET 9 N48: and an escaped hash-word is the title's own word. The
+    // exporter writes a title's "#launch" as "\\#launch" (escapeTagLike) so
+    // this reader does not lift it out as a tag; here the backslash goes.
+    // Only where escapeTagLike would have put one - a tag-like word.
+    .replace(/\\#([\p{L}\p{N}_/-]+)/gu, (all, slug: string) =>
+      isTagToken(slug) ? '#' + slug : all);
   return { text: cleaned, tags };
 }
 

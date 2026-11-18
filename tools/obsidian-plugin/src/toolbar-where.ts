@@ -88,6 +88,18 @@ export function destinationOf(
   return { route: null, module: null, via: 'none' };
 }
 
+/** The Tasks module a line at [dest] lands in, by id: the vault's inbox when
+ *  that is where it falls, else the module the token named, else the first
+ *  Tasks module of the space — the server's own order. Null when it cannot be
+ *  said (no space, or a named module that is not a Tasks one). */
+export function taskModuleOf(dest: Destination, inboxModuleId: string | null): string | null {
+  if (!dest.route) return null;
+  if (dest.via === 'inbox') return inboxModuleId;
+  const tasks = dest.route.modules.filter((m) => m.type === 'TASKS');
+  if (dest.module) return tasks.find((m) => lc(m.name) === lc(dest.module!))?.id ?? null;
+  return tasks[0]?.id ?? null;
+}
+
 /** One module a list may be started for. */
 export interface ListTarget {
   route: Route;

@@ -53,7 +53,7 @@ export type Spot = { rec: RecordRef } | { none: string };
 /** How a line sits in the vault, as far as the plugin knows. */
 export interface LinePlace {
   /** Synced by this plugin. Absent for any other note. */
-  synced?: { role?: 'index' | 'module' };
+  synced?: { role?: 'index' | 'module' | 'page' };
 }
 
 /** Said when the cursor is on nothing the panel can address. */

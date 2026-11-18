@@ -13,6 +13,15 @@
  *     pages". The list is empty by default (RU-035: this sends note text off
  *     the machine, so it is off until it is set).
  *
+ * THEIR OWN SWITCH (Omar 2026-11-07, "Own switch, still needs a space"): pages
+ * are sent only while "Send notes to Graphite as pages" is on, which is off
+ * until turned on (RU-035), AND the vault is bound to a space. A capture inbox
+ * is not needed: a page never touches it.
+ *
+ * WHERE: a page folder can name the Notes module its pages are filed in (Omar
+ * 2026-11-07, "One choice per page folder"). With none named the server files
+ * in the bound space's first Notes module.
+ *
  * WHEN: a minute after the note stops changing - capture's own quiet-wait
  * (`autoCaptureDelay`) - and never while it is open in the editor. A capture
  * sends the page first and names it, so the tasks it makes link to the page.
@@ -48,6 +57,23 @@ export function hasRoutingHeading(text: string): boolean {
   return false;
 }
 
+/** The Notes module chosen for the folder that holds [path], or undefined for
+ *  the default. The LONGEST listed folder holding the note decides, so a
+ *  nested folder has a choice of its own; a note in no listed folder (a routing
+ *  heading made it a page) has none. A choice for a folder no longer listed is
+ *  ignored. */
+export function pageModuleFor(
+  path: string, setting: string, modules: Record<string, string> | null | undefined,
+): string | undefined {
+  let best = '';
+  for (const f of parseFolders(setting)) {
+    if (path.startsWith(`${f}/`) && f.length > best.length) best = f;
+  }
+  if (!best) return undefined;
+  const id = modules?.[best];
+  return typeof id === 'string' && id ? id : undefined;
+}
+
 export function isPage(path: string, text: string, folders: string): boolean {
   return inPageFolder(path, folders) || hasRoutingHeading(text);
 }
@@ -68,9 +94,12 @@ export function fingerprint(text: string): string {
 }
 
 export interface PageHost {
-  /** Bound on the server with an inbox, as the server last said (captureOn). */
+  /** The pages switch is on and the vault is bound to a space, as the server
+   *  last said. A capture inbox is not part of it. */
   on(): boolean;
   folders(): string;
+  /** The Notes module chosen for [path]'s folder, if any. */
+  moduleFor(path: string): string | undefined;
   vaultName(): string;
   /** A note the plugin must never send: a synced space file, its own notes. */
   excluded(path: string): boolean;
@@ -164,10 +193,18 @@ export class PageSync {
     const text = await this.host.read(path);
     if (text === null) return false;
     if (!isPage(path, text, this.host.folders())) return false;
-    const print = fingerprint(text);
+    // The module is part of what was sent: a folder given another module sends
+    // its unchanged notes again, once, so the pages move.
+    const moduleId = this.host.moduleFor(path);
+    const print = fingerprint(text) + (moduleId ? `@${moduleId}` : '');
+    const prior = this.host.sent[path] ?? (oldPath ? this.host.sent[oldPath] : undefined);
     if (this.host.sent[path] === print && !oldPath) return true;
+    // Back to the default after a chosen module is said, not left out: left out
+    // would keep the page where the last send put it.
+    const where = moduleId ? { moduleId } : prior?.includes('@') ? { moduleId: null } : {};
     const res = await this.host.send('PUT', {
-      path, content: text, vaultName: this.host.vaultName(), ...(oldPath ? { oldPath } : {}),
+      path, content: text, vaultName: this.host.vaultName(), ...where,
+      ...(oldPath ? { oldPath } : {}),
     });
     if (res.status >= 300) {
       if (!this.told.has(path)) {

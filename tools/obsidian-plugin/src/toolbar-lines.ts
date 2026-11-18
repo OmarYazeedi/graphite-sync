@@ -14,6 +14,8 @@
  * bundle.
  */
 
+import { BuiltInPriority, DEFAULT_PRIORITY_NAMES } from '../../../apps/api/src/shared/task-vocabulary';
+
 /** A checkbox line, the shape taskBox reads on the server. */
 const TASK_LINE = /^(\s*)[-*]\s+\[([ xX-])\]\s?(.*)$/;
 /** A plain bullet or numbered line, which a task may be made from. */
@@ -25,6 +27,34 @@ const MARKER_PART = /^(?:lp|gr)\s*:/i;
 
 export const PRIORITIES = ['low', 'normal', 'high', 'critical'] as const;
 export type Priority = (typeof PRIORITIES)[number];
+
+/** A row of the Priority picker: what it shows, what it writes, a hint. */
+export interface PriorityChoice { label: string; value: string; hint?: string }
+
+/** The rows of the Priority picker. With no words of the module's own, the
+ *  four built-in levels; with them, the module's list in its order — each
+ *  written as its name, which the capture door reads against that module's
+ *  words before the built-ins. A custom word says what it counts as. A name
+ *  with a bar in it is written escaped, so it stays one word on the line. */
+export function priorityChoices(
+  words?: { priorities: { name: string; countsAs: string }[] } | null,
+): PriorityChoice[] {
+  const list = words?.priorities ?? [];
+  if (!list.length) {
+    return PRIORITIES.map((p) => ({
+      label: p[0].toUpperCase() + p.slice(1), value: p, hint: p === 'normal' ? 'default' : undefined,
+    }));
+  }
+  return list.map((w) => {
+    const builtIn = DEFAULT_PRIORITY_NAMES[w.countsAs as BuiltInPriority] ?? w.countsAs;
+    const same = w.name.toLowerCase() === builtIn.toLowerCase();
+    return {
+      label: w.name,
+      value: w.name.replace(/\|/g, '\\|'),
+      hint: same ? (w.countsAs === 'NORMAL' ? 'default' : undefined) : `counts as ${builtIn}`,
+    };
+  });
+}
 
 export function isTaskLine(line: string): boolean {
   return TASK_LINE.test(line);

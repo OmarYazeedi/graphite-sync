@@ -23,6 +23,9 @@
  */
 
 import { RawSpace } from './routing';
+import {
+  BUILT_IN_PRIORITIES, BUILT_IN_STATUSES, defaultVocabulary,
+} from '../../../apps/api/src/shared/task-vocabulary';
 
 export const TOOLBAR_LISTS_PATH = 'Graphite/Toolbar lists.json';
 
@@ -31,6 +34,48 @@ export function isToolbarFile(path: string): boolean {
 }
 
 export interface ToolbarPerson { name: string; color: string | null }
+
+/** One of a Tasks module's own words: its name and the built-in it counts as.
+ *  NAMES ONLY — the module's ids and colours are not carried. */
+export interface ToolbarWord { name: string; countsAs: string }
+
+/** A Tasks module's statuses and priorities, in its order. */
+export interface ToolbarWords { priorities: ToolbarWord[]; statuses: ToolbarWord[] }
+
+const MAX_WORD = 40;
+const MAX_WORDS = 24;
+
+/** The words of a list, copied field by field: a name with something in it and
+ *  a built-in kind it counts as; anything else is dropped. */
+function wordsList(v: unknown, kinds: readonly string[]): ToolbarWord[] {
+  if (!Array.isArray(v)) return [];
+  const out: ToolbarWord[] = [];
+  for (const w of v) {
+    const name = typeof w?.name === 'string' ? w.name.trim().slice(0, MAX_WORD) : '';
+    if (!name || typeof w?.countsAs !== 'string' || !kinds.includes(w.countsAs)) continue;
+    out.push({ name, countsAs: w.countsAs });
+    if (out.length >= MAX_WORDS) break;
+  }
+  return out;
+}
+
+function wordsOf(v: any): ToolbarWords {
+  return {
+    priorities: wordsList(v?.priorities, BUILT_IN_PRIORITIES),
+    statuses: wordsList(v?.statuses, BUILT_IN_STATUSES),
+  };
+}
+
+/** What `GET /modules/:id/task-settings` says, as the file keeps it — or null
+ *  when the module uses the built-ins exactly as shipped (nothing to carry). */
+export function wordsFromSettings(settings: unknown): ToolbarWords | null {
+  const words = wordsOf(settings);
+  if (!words.priorities.length && !words.statuses.length) return null;
+  const shipped = defaultVocabulary();
+  const same = (a: ToolbarWord[], b: ToolbarWord[]) =>
+    a.length === b.length && a.every((w, i) => w.name === b[i].name && w.countsAs === b[i].countsAs);
+  return same(words.priorities, shipped.priorities) && same(words.statuses, shipped.statuses) ? null : words;
+}
 
 export interface ToolbarLists {
   graphite: 'toolbar-lists';
@@ -44,6 +89,9 @@ export interface ToolbarLists {
   people: Record<string, ToolbarPerson[]>;
   /** Tags in use, without `#`. */
   tags: string[];
+  /** Tasks modules that name their own statuses or priorities, by module id.
+   *  A module using the built-ins as shipped is not here. */
+  words: Record<string, ToolbarWords>;
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -69,6 +117,7 @@ export function buildLists(input: {
   spaces: readonly RawSpace[];
   people: Record<string, readonly ToolbarPerson[]>;
   tags: readonly string[];
+  words?: Record<string, ToolbarWords>;
 }): ToolbarLists {
   const seen = new Map<string, string>();
   for (const t of input.tags) {
@@ -84,6 +133,9 @@ export function buildLists(input: {
       id, ps.map((p) => ({ name: p.name, color: p.color ?? null })),
     ])),
     tags: [...seen.values()].sort((a, b) => a.localeCompare(b)),
+    words: Object.fromEntries(Object.entries(input.words ?? {})
+      .map(([id, w]): [string, ToolbarWords] => [id, wordsOf(w)])
+      .filter(([, w]) => w.priorities.length || w.statuses.length)),
   };
 }
 
@@ -110,6 +162,7 @@ export function readListsFile(text: string): ToolbarLists | null {
     spaces: raw.spaces,
     people,
     tags: Array.isArray(raw.tags) ? raw.tags.filter((t: unknown): t is string => typeof t === 'string') : [],
+    words: raw.words && typeof raw.words === 'object' ? raw.words : {},
   });
 }
 
