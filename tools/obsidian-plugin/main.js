@@ -47,6 +47,7 @@ __export(main_exports, {
   PARAMS_DOC_ID: () => PARAMS_DOC_ID,
   PRIORITIES: () => PRIORITIES,
   PULL_PAGE: () => PULL_PAGE,
+  Pacer: () => Pacer,
   SEAL_ATTACHMENT: () => SEAL_ATTACHMENT,
   SECRET_KEYS: () => SECRET_KEYS,
   SETTINGS_NOTE_PATH: () => SETTINGS_NOTE_PATH,
@@ -2391,6 +2392,33 @@ function doorShort(why) {
   return why === "phone" ? "needs the desktop app" : why === "refused" ? "Graphite is not running" : why === "no-file" ? "not turned on in Graphite" : "Graphite file unreadable";
 }
 
+// src/pacer.ts
+var realClock = {
+  now: () => Date.now(),
+  sleep: (ms2) => new Promise((r) => setTimeout(r, ms2))
+};
+var WORK_MS = 8;
+var REST_MS = 20;
+var Pacer = class {
+  constructor(clock2 = realClock, workMs = WORK_MS, restMs = REST_MS) {
+    this.clock = clock2;
+    this.workMs = workMs;
+    this.restMs = restMs;
+    this.since = clock2.now();
+  }
+  since;
+  /** How many times the thread was set down; a test reads it. */
+  rests = 0;
+  /** Call between units of work (one file, one note). Rests when the slice
+   *  has run long enough; otherwise returns at once. */
+  async tick() {
+    if (this.clock.now() - this.since < this.workMs) return;
+    this.rests++;
+    await this.clock.sleep(this.restMs);
+    this.since = this.clock.now();
+  }
+};
+
 // src/page-files.ts
 var PAGE_FILE_TYPE = "notebook_page";
 var dirOf = (path) => {
@@ -4239,7 +4267,9 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
     this.addRibbonIcon("refresh-cw", "Graphite sync", () => this.openPanel());
     this.statusEl = this.addStatusBarItem();
     this.setStatus("\u2026", "checking");
-    window.setTimeout(() => void this.checkConnection(false), 800);
+    this.app.workspace.onLayoutReady(() => {
+      window.setTimeout(() => void this.checkConnection(false), this.startupDelayMs);
+    });
     this.addCommand({ id: "lp-open-panel", name: "Open the sync panel", callback: () => this.openPanel() });
     this.addCommand({ id: "lp-pull-all", name: "Bring in every space", callback: () => void this.mirrorEverySpace(true) });
     this.addCommand({ id: "lp-pull-space", name: "Pull a space (pick destination vault)", callback: () => this.chooseAndPull() });
@@ -4328,7 +4358,14 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
       save: () => this.saveSettings(),
       say: (m) => void new import_obsidian4.Notice(m, 1e4),
       delay: () => this.autoCaptureDelay,
-      watch: (ev, cb) => this.registerEvent(this.app.vault.on(ev, cb)),
+      // 0.6.9: the plugin's OWN writes (a pull, a canonicalising push) are not
+      // the person's edits. Without this every note a pull created was looked
+      // at as a page candidate - a read of each - before its tracking was
+      // written, since the file exists a moment before its entry does.
+      watch: (ev, cb) => this.registerEvent(this.app.vault.on(ev, (...a) => {
+        if (this.writingBack > 0 && (ev === "modify" || ev === "create")) return;
+        cb(...a);
+      })),
       setTimeout: (fn, ms2) => window.setTimeout(fn, ms2),
       clearTimeout: (t) => window.clearTimeout(t)
     });
@@ -4422,8 +4459,12 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
       name: "Sync notes now",
       callback: () => void this.syncNotesNow({ loud: true })
     });
-    this.registerEvent(this.app.vault.on("modify", () => this.noteSyncSoon()));
-    this.registerEvent(this.app.vault.on("create", () => this.noteSyncSoon()));
+    this.registerEvent(this.app.vault.on("modify", () => {
+      if (!this.writingBack) this.noteSyncSoon();
+    }));
+    this.registerEvent(this.app.vault.on("create", () => {
+      if (!this.writingBack) this.noteSyncSoon();
+    }));
     this.registerEvent(this.app.vault.on("delete", (f) => {
       const gone = f?.path;
       if (gone && this.writingBack === 0 && this.settings.files[gone]?.role === "page") {
@@ -5003,7 +5044,8 @@ ${p}`))}`;
       void this.publishToolbarListsSoon();
       if (this.settings.agentOn) void this.publishAgentContract();
       else void this.refreshRoutes();
-      void this.mirrorEverySpace(false);
+      window.clearTimeout(this.mirrorTimer);
+      this.mirrorTimer = window.setTimeout(() => void this.mirrorEverySpace(false), this.firstMirrorDelayMs);
       return true;
     } catch (e) {
       this.lastMe = null;
@@ -6557,6 +6599,16 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  that were banked or let go still say so. */
   quietPulls = 0;
   mirroring = false;
+  /** 0.6.9: how long after the layout is ready the first connection check
+   *  runs; a test sets it to nothing. */
+  startupDelayMs = 800;
+  /** 0.6.9: how long the automatic bring-in of every space waits after the
+   *  connection check that found it owed, and the rest it takes between one
+   *  space and the next. Both are there so Obsidian finishes opening, and
+   *  then indexes one space's notes before the next arrive. */
+  firstMirrorDelayMs = 3e3;
+  spaceGapMs = 250;
+  mirrorTimer = 0;
   /** 0.6.1 · LINKING IS ENOUGH. Pulls every space the key can read - the ones
    *  the person owns and the ones shared with them, which is what
    *  `GET /spaces` lists - into this vault, in the vault's layout.
@@ -6593,13 +6645,16 @@ ${block.join("\n")}`, { line, ch: old.length });
       const todo = spaces.filter((sp) => this.entriesForSpace(sp.id).length === 0 && (loud || !seen.has(sp.id)));
       this.quietPulls++;
       try {
-        for (const sp of todo) {
+        for (let i = 0; i < todo.length; i++) {
+          const sp = todo[i];
+          if (i > 0 && this.spaceGapMs > 0) await new Promise((r) => window.setTimeout(r, this.spaceGapMs));
           await this.pullSpace(sp);
           if (this.entriesForSpace(sp.id).length > 0) brought++;
           else failed.push(sp.name);
         }
       } finally {
         this.quietPulls--;
+        this.refreshPanel();
       }
       const next = /* @__PURE__ */ new Set([...seen, ...spaces.map((sp) => sp.id)]);
       if (next.size !== seen.size) {
@@ -6919,7 +6974,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       };
       putBase(this.settings.bases, fileName, text);
       await this.saveSettings();
-      this.refreshPanel();
+      if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
       if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
@@ -6959,9 +7014,11 @@ ${block.join("\n")}`, { line, ch: old.length });
       const renamed = /* @__PURE__ */ new Set();
       const banked = [];
       this.writingBack++;
+      const pace = new Pacer();
       try {
         await this.ensureFolder(out.folder);
         for (const f of out.files) {
+          await pace.tick();
           await this.ensureDirs(f.path);
           const was = previous.find((p) => p.path !== f.path && (f.kind === "page" ? p.entry.role === "page" && p.entry.noteId === f.noteId : f.kind === "module" ? p.entry.role !== "page" && p.entry.moduleId === f.moduleId : p.entry.role === "index"));
           if (was) {
@@ -7002,6 +7059,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       this.writingBack++;
       try {
         for (const d of gone) {
+          await pace.tick();
           const f = d.entry.role === "page" ? this.app.vault.getAbstractFileByPath(d.path) : null;
           const inScope = !effective?.length || d.entry.moduleId !== void 0 && effective.includes(d.entry.moduleId);
           if (f instanceof import_obsidian4.TFile && inScope && hash(await this.app.vault.read(f)) === d.entry.lastHash) {
@@ -7022,7 +7080,7 @@ ${block.join("\n")}`, { line, ch: old.length });
         delete this.settings.bases[d.path];
       }
       await this.saveSettings();
-      this.refreshPanel();
+      if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
       if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ \u2014 ${out.files.length} note${out.files.length === 1 ? "" : "s"}.`);
       if (trashed.length) {

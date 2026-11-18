@@ -76,6 +76,7 @@ export { isBelow, readHandshake } from './handshake';
 export { recordAt, pickerRoles } from './links';
 // R-062: the marker readers, exported so the suite can read them off the bundle.
 export { lpHiddenRanges, isMarkerHeaderCell } from './lp-ids';
+export { Pacer } from './pacer';
 export { noteSpace, frontmatterFor, buildRoutes } from './routing';
 export { readProposal, finalised, approvedText, proposalLine, proposalsIn } from './proposals';
 export { censusOf } from './census';
@@ -113,6 +114,7 @@ import {
 } from './note-engine';
 import { sha256Hex as noteSha } from './note-crypto';
 import { carryIds, mergeLines } from './note-merge';
+import { Pacer } from './pacer';
 import { conflictCopyPath } from './note-engine';
 export {
   CouchClient, CouchDocSync, CouchError, LiveFollower, COUCH_DB_NAME, PULL_PAGE,
@@ -1034,7 +1036,12 @@ export default class GraphitePlugin extends Plugin {
 
     this.statusEl = this.addStatusBarItem();
     this.setStatus('…', 'checking');
-    window.setTimeout(() => void this.checkConnection(false), 800);
+    // 0.6.9: NOTHING RUNS AGAINST THE SERVER WHILE OBSIDIAN IS STILL OPENING.
+    // The first check waits for the workspace to be laid out (the vault's files
+    // are indexed by then), and only then for its short delay.
+    this.app.workspace.onLayoutReady(() => {
+      window.setTimeout(() => void this.checkConnection(false), this.startupDelayMs);
+    });
 
     this.addCommand({ id: 'lp-open-panel', name: 'Open the sync panel', callback: () => this.openPanel() });
     this.addCommand({ id: 'lp-pull-all', name: 'Bring in every space', callback: () => void this.mirrorEverySpace(true) });
@@ -1138,7 +1145,16 @@ export default class GraphitePlugin extends Plugin {
       save: () => this.saveSettings(),
       say: (m) => void new Notice(m, 10000),
       delay: () => this.autoCaptureDelay,
-      watch: (ev, cb) => this.registerEvent(this.app.vault.on(ev as 'modify', cb)),
+      // 0.6.9: the plugin's OWN writes (a pull, a canonicalising push) are not
+      // the person's edits. Without this every note a pull created was looked
+      // at as a page candidate - a read of each - before its tracking was
+      // written, since the file exists a moment before its entry does.
+      watch: (ev, cb) => this.registerEvent(this.app.vault.on(ev as 'modify', (...a: any[]) => {
+        // Only a modify or create: a person deleting or moving a page note
+        // while a pull runs is still theirs to be heard.
+        if (this.writingBack > 0 && (ev === 'modify' || ev === 'create')) return;
+        cb(...a);
+      })),
       setTimeout: (fn, ms) => window.setTimeout(fn, ms),
       clearTimeout: (t) => window.clearTimeout(t as number),
     });
@@ -1250,8 +1266,10 @@ export default class GraphitePlugin extends Plugin {
       name: 'Sync notes now',
       callback: () => void this.syncNotesNow({ loud: true }),
     });
-    this.registerEvent(this.app.vault.on('modify', () => this.noteSyncSoon()));
-    this.registerEvent(this.app.vault.on('create', () => this.noteSyncSoon()));
+    // 0.6.9: not for the plugin's own writes (a pull writing a space is not a
+    // change to send; it re-armed the timer once per file).
+    this.registerEvent(this.app.vault.on('modify', () => { if (!this.writingBack) this.noteSyncSoon(); }));
+    this.registerEvent(this.app.vault.on('create', () => { if (!this.writingBack) this.noteSyncSoon(); }));
     // ROW 2514: a note deleted or renamed here has no file at the old path,
     // so its base goes (the entry stays, as it always has, shown as missing).
     this.registerEvent(this.app.vault.on('delete', (f: unknown) => {
@@ -1886,7 +1904,8 @@ export default class GraphitePlugin extends Plugin {
       else void this.refreshRoutes();
       // Linking is enough: whatever space the key can read and this vault has
       // not been offered comes in now.
-      void this.mirrorEverySpace(false);
+      window.clearTimeout(this.mirrorTimer);
+      this.mirrorTimer = window.setTimeout(() => void this.mirrorEverySpace(false), this.firstMirrorDelayMs);
       return true;
     } catch (e: any) {
       this.lastMe = null;
@@ -3562,6 +3581,16 @@ export default class GraphitePlugin extends Plugin {
    *  that were banked or let go still say so. */
   private quietPulls = 0;
   private mirroring = false;
+  /** 0.6.9: how long after the layout is ready the first connection check
+   *  runs; a test sets it to nothing. */
+  startupDelayMs = 800;
+  /** 0.6.9: how long the automatic bring-in of every space waits after the
+   *  connection check that found it owed, and the rest it takes between one
+   *  space and the next. Both are there so Obsidian finishes opening, and
+   *  then indexes one space's notes before the next arrive. */
+  firstMirrorDelayMs = 3000;
+  spaceGapMs = 250;
+  private mirrorTimer = 0;
 
   /** 0.6.1 · LINKING IS ENOUGH. Pulls every space the key can read - the ones
    *  the person owns and the ones shared with them, which is what
@@ -3603,12 +3632,19 @@ export default class GraphitePlugin extends Plugin {
         this.entriesForSpace(sp.id).length === 0 && (loud || !seen.has(sp.id)));
       this.quietPulls++;
       try {
-        for (const sp of todo) {
+        for (let i = 0; i < todo.length; i++) {
+          const sp = todo[i];
+          // A rest between spaces: the notes of the last one are indexed, the
+          // window is drawn and answers, before the next one's arrive.
+          if (i > 0 && this.spaceGapMs > 0) await new Promise((r) => window.setTimeout(r, this.spaceGapMs));
           await this.pullSpace(sp);
           if (this.entriesForSpace(sp.id).length > 0) brought++; else failed.push(sp.name);
         }
       } finally {
         this.quietPulls--;
+        // ONE redraw of the panel for the whole run, not one per space: each
+        // draw reads and hashes every synced note to say whether it changed.
+        this.refreshPanel();
       }
       const next = new Set([...seen, ...spaces.map((sp) => sp.id)]);
       if (next.size !== seen.size) {
@@ -3957,7 +3993,7 @@ export default class GraphitePlugin extends Plugin {
       };
       putBase(this.settings.bases, fileName, text);
       await this.saveSettings();
-      this.refreshPanel();
+      if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
       if (!this.quietPulls) new Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
@@ -3999,9 +4035,13 @@ export default class GraphitePlugin extends Plugin {
       // versions are banked beside them, never silently replaced.
       const banked: string[] = [];
       this.writingBack++;
+      // 0.6.9: a space of hundreds of notes is written in slices, not in one
+      // run that holds Obsidian's thread (pacer.ts says why).
+      const pace = new Pacer();
       try {
         await this.ensureFolder(out.folder);
         for (const f of out.files) {
+          await pace.tick();
           // R-8336: a page lives in a folder of its notebook and section, which
           // may not exist yet (or not any more, after a move).
           await this.ensureDirs(f.path);
@@ -4061,6 +4101,7 @@ export default class GraphitePlugin extends Plugin {
       this.writingBack++;
       try {
         for (const d of gone) {
+          await pace.tick();
           const f = d.entry.role === 'page' ? this.app.vault.getAbstractFileByPath(d.path) : null;
           const inScope = !effective?.length || (d.entry.moduleId !== undefined && effective.includes(d.entry.moduleId));
           if (f instanceof TFile && inScope && hash(await this.app.vault.read(f)) === d.entry.lastHash) {
@@ -4080,7 +4121,7 @@ export default class GraphitePlugin extends Plugin {
         delete this.settings.bases[d.path];
       }
       await this.saveSettings();
-      this.refreshPanel();
+      if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? '' : 's'})` : '';
       if (!this.quietPulls) new Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ — ${out.files.length} note${out.files.length === 1 ? '' : 's'}.`);
       if (trashed.length) {
