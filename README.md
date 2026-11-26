@@ -85,6 +85,11 @@ does not write into an Obsidian vault yet.
   the vault, and pushes never touch them.
 - **Auto-push on save** *(optional, off by default)* — tracked files push a
   couple of seconds after you stop typing.
+- **Pull while Obsidian is open** *(on by default)* — every 5 minutes, while
+  Obsidian is open, the spaces this vault mirrors are looked at and what
+  changed in Graphite comes in. A note you have edited here is never
+  overwritten: it is left alone and the plugin says which. The only server
+  asked is your own.
 - **Status bar + test button** — a permanent connection indicator, and a
   one-click "Test connection" in settings (and *Test the server connection* on the palette) that tells you exactly why a
   token or URL doesn't work.
@@ -217,16 +222,29 @@ does not write into an Obsidian vault yet.
   want in the vault must be kept on that server. Spaces kept only on your
   devices, or shared between them through the relay, are not reachable (see
   the top of this page).
-- An **API token**: in the app go to *Settings → Where am I signed in? →
-  Generate API token*, and paste it into the plugin settings together with
-  your server URL. Tokens are listed and revocable in the app at any time.
-  An app used only on a device, with no server account, offers no API token.
+- A **key** for the plugin: in the app go to *Preferences → Data and server →
+  Obsidian mirror*, make a key for the plugin and press **Copy plugin link**.
+  The link is one line that holds the server address and the key, so a
+  second device is one paste. On a device where pasting is awkward, press
+  **Show a pairing code** in the same place instead: six characters that work
+  once, for ten minutes. Type them into *Pairing code* in the plugin settings,
+  with the server address filled in beside it, and the plugin trades them for
+  the key. (The older route still works: copy the key and type the address
+  beside it in the plugin settings.) Keys are listed and
+  revocable in the app at any time. An app used only on a device, with no
+  server account, offers no key.
 
 ## Quick start
 
 1. Install and enable the plugin, open its settings.
-2. Enter your server URL and an API token, hit **Test connection**.
-3. Your spaces arrive on their own once the connection test passes. To pull
+2. The settings open on **Set up**. Paste the plugin link into *Paste the link
+   from Graphite*: the server address and the key are filled in and the
+   connection is tested. Or fill in the server address and type the six
+   characters from *Show a pairing code* into *Pairing code*. Every other
+   option is under **More options**.
+3. Switch on the spaces to mirror (a space you own at once, one shared with you
+   when its owner approves). Your spaces arrive on their own once the
+   connection test passes. To pull
    one by hand, or into another vault, run **Pull a space (pick destination
    vault)** from the command palette (or the ribbon icon → *Pull a space…*).
 4. Edit the pulled file, then **Push the current file back** — or switch on

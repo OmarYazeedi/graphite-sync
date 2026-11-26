@@ -176,20 +176,23 @@ export const LINK_GRAMMAR: Record<string, RoleGrammar> = {
   'checklist-of': {
     // R-473: direction is task → its checklist.
     label: 'Broken down into',
+    // The door's own ends (link-role-ends.ts), held equal by
+    // link-grammar-parity.spec: a whole checklist MODULE is a reader-backed
+    // end (progressFor) the picker never offered.
     from: ['tasks'],
-    to: ['checklist-items'],
+    to: ['modules', 'checklist-items'],
     offered: true,
   },
   needs: {
     label: 'Needs',
     from: ['events', 'visits'],
-    to: ['checklist-items', 'supplies'],
+    to: ['modules', 'checklist-items', 'supplies'],
     offered: true,
   },
   tracks: {
     // The streak engine's subject: what this goal or habit is counting.
     label: 'Tracks',
-    from: ['goals', 'habits'],
+    from: ['goals', 'habits', 'medications'],
     to: 'any',
     // Rows 1008/1009 (S-162 F7): a care record is never a streak's subject.
     notTo: CARE_NEVER_SCORED,

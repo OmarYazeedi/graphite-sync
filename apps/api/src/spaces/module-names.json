@@ -115,9 +115,9 @@
     "records": "Rows"
   },
   "ROTA": {
-    "name": "Rota",
-    "record": "Duty",
-    "records": "Duties"
+    "name": "Chores",
+    "record": "Chore",
+    "records": "Chores"
   },
   "PERSON_DETAILS": {
     "name": "Person Details",

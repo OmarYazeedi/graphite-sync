@@ -317,6 +317,22 @@ export class CouchDocSync {
     });
   }
 
+  /** The sequence after `since` when every change since is one of [revs]
+   *  (our own writes), read without the documents; null when any other
+   *  change is in between. */
+  async onlyOwn(since: string | null, revs: ReadonlySet<string>): Promise<string | null> {
+    let at = since;
+    for (;;) {
+      const page = await this.client.changes({ since: at, limit: PULL_PAGE });
+      for (const r of page.results) {
+        if (r.id.startsWith('_design/')) continue;
+        if (!r.changes.every((c) => revs.has(c.rev))) return null;
+      }
+      at = page.lastSeq;
+      if (page.pending <= 0) return at;
+    }
+  }
+
   /** Live sync's wait: true as soon as anything changes after `since`,
    *  false when `ms` passes with nothing. */
   async wait(since: string | null, ms: number): Promise<boolean> {

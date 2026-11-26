@@ -38,6 +38,7 @@ export const NOTE_KEYS: readonly NoteKey[] = [
   { key: 'layout', kind: { kind: 'choice', options: ['folder', 'single'] }, label: 'How a pulled space lands' },
   { key: 'hideIds', kind: { kind: 'bool' }, label: 'Hide sync ids' },
   { key: 'autoPush', kind: { kind: 'bool' }, label: 'Auto-push on save' },
+  { key: 'timedPull', kind: { kind: 'bool' }, label: 'Pull while Obsidian is open' },
   { key: 'captureAnyTagged', kind: { kind: 'bool' }, label: 'Capture any tagged line as a note' },
   { key: 'captureTags', kind: { kind: 'text' }, label: 'Tags that capture a line' },
   { key: 'autoCapture', kind: { kind: 'bool' }, label: 'Capture automatically' },

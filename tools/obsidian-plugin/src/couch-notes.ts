@@ -35,7 +35,7 @@
  * transport refuses it before it writes anything.
  */
 
-import { CouchClient, CouchDocSync, type CouchDoc } from './couch-client';
+import { CouchClient, CouchDocSync, CouchError, type CouchDoc } from './couch-client';
 import {
   NOTE_DOC_PREFIX, PARAMS_DOC_ID, NoteKey, bytesToBase64, newParams, openFile, openParams, sealFile,
 } from './note-crypto';
@@ -79,7 +79,9 @@ export class CouchNoteTransport implements NoteTransport {
     if (!this.passphrase) {
       throw new NoteSyncRefusal('Enter the encryption passphrase in the Graphite Sync settings. Nothing was sent.');
     }
-    await this.client.ensureDb();
+    // Only a database that is not there is made: CouchDB lets a server admin
+    // alone PUT one, so a member of an existing database would be refused.
+    if (!(await this.client.info())) await this.client.ensureDb();
     let params = await this.client.get(PARAMS_DOC_ID);
     if (!params) {
       const info = await this.client.info();
@@ -111,7 +113,16 @@ export class CouchNoteTransport implements NoteTransport {
 
   async pull(cursor: string | null): Promise<{ files: RemoteFile[]; cursor: string; more: boolean; unreadable: number }> {
     const key = await this.opened();
-    const page = await this.docs.pull(cursor);
+    let page;
+    try {
+      page = await this.docs.pull(cursor);
+    } catch (e) {
+      // A cursor the server will not take (the database was restored or
+      // moved) is started over: what is already here is compared by hash,
+      // so taking everything again changes nothing that agrees.
+      if (!(cursor && e instanceof CouchError && e.status === 400)) throw e;
+      page = await this.docs.pull(null);
+    }
     const files: RemoteFile[] = [];
     let unreadable = 0;
     for (const d of page.docs) {
@@ -195,6 +206,10 @@ export class CouchNoteTransport implements NoteTransport {
     const key = await this.opened();
     const id = await key.idFor(path);
     await this.docs.push(versions.map((rev) => ({ _id: id, _rev: rev, _deleted: true }) as CouchDoc));
+  }
+
+  skipOwn(cursor: string | null, versions: ReadonlySet<string>): Promise<string | null> {
+    return this.docs.onlyOwn(cursor, versions);
   }
 
   wait(cursor: string | null, ms: number): Promise<boolean> {

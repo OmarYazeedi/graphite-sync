@@ -59,6 +59,10 @@ export interface NoteTransport {
   push(files: OutgoingFile[]): Promise<PushOutcome[]>;
   /** Let the losing versions of [path] go, once they are kept here. */
   settle?(path: string, versions: string[]): Promise<void>;
+  /** The cursor after the far side's changes that are all [versions] —
+   *  what this device itself just wrote — or null when anything else
+   *  changed since [cursor]. Lets live sync step over its own pushes. */
+  skipOwn?(cursor: string | null, versions: ReadonlySet<string>): Promise<string | null>;
   /** Live sync: resolves true when something new has arrived after
    *  `cursor`, false when `ms` passed with nothing. */
   wait(cursor: string | null, ms: number): Promise<boolean>;

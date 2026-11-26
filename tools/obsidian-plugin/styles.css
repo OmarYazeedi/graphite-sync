@@ -182,3 +182,5 @@ li.gr-proposal { background: rgba(242, 184, 75, 0.14); box-shadow: inset 3px 0 0
 .gr-bar-primary .gr-bar-icon { color: inherit; }
 .gr-bar-right { margin-left: auto; }
 .gr-bar.gr-bar-mobile .gr-bar-btn { min-height: 44px; min-width: 44px; justify-content: center; padding: 6px 12px; }
+.gr-more { margin-top: 18px; border-top: 1px solid var(--background-modifier-border); padding-top: 10px; }
+.gr-more > summary { cursor: pointer; font-weight: 600; padding: 6px 0; }

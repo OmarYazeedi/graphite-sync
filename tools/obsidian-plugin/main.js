@@ -30,6 +30,7 @@ __export(main_exports, {
   DUE_TIMES: () => DUE_TIMES,
   INLINE_SEAL_MAX: () => INLINE_SEAL_MAX,
   KEPT_OUT: () => KEPT_OUT,
+  LINK_PREFIX: () => LINK_PREFIX,
   LIVE_BACKOFF_FIRST_MS: () => LIVE_BACKOFF_FIRST_MS,
   LIVE_BACKOFF_MAX_MS: () => LIVE_BACKOFF_MAX_MS,
   LiveFollower: () => LiveFollower,
@@ -100,6 +101,7 @@ __export(main_exports, {
   listsFile: () => listsFile,
   lookForMirror: () => lookForMirror,
   lpHiddenRanges: () => lpHiddenRanges,
+  makeLink: () => makeLink,
   mergeLines: () => mergeLines,
   mergeable: () => mergeable,
   mintVaultId: () => mintVaultId,
@@ -120,6 +122,8 @@ __export(main_exports, {
   pageModuleFor: () => pageModuleFor,
   pageRenameOf: () => pageRenameOf,
   parseFolders: () => parseFolders,
+  parseLink: () => parseLink,
+  parsePairingCode: () => parsePairingCode,
   pickerRoles: () => pickerRoles,
   priorityChoices: () => priorityChoices,
   proposalLine: () => proposalLine,
@@ -152,6 +156,63 @@ __export(main_exports, {
   weekday: () => weekday
 });
 module.exports = __toCommonJS(main_exports);
+
+// src/link-code.ts
+var LINK_PREFIX = "graphite-link:v1.";
+var PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+function parsePairingCode(text) {
+  const code2 = String(text ?? "").toUpperCase().replace(/[\s-]/g, "");
+  if (code2.length !== 6) return null;
+  for (const ch of code2) if (!PAIRING_ALPHABET.includes(ch)) return null;
+  return code2;
+}
+function fromBase64Url(text) {
+  try {
+    const std = text.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = std + "=".repeat((4 - std.length % 4) % 4);
+    const bin = atob(padded);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+function toBase64Url(text) {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function makeLink(serverUrl, token) {
+  return LINK_PREFIX + toBase64Url(JSON.stringify({ s: serverUrl, k: token }));
+}
+function parseLink(text) {
+  const line = String(text ?? "").trim();
+  if (!line.startsWith(LINK_PREFIX)) return null;
+  const json = fromBase64Url(line.slice(LINK_PREFIX.length));
+  if (json === null) return null;
+  let o;
+  try {
+    o = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== "object") return null;
+  const { s, k } = o;
+  if (typeof s !== "string" || typeof k !== "string") return null;
+  let url;
+  try {
+    url = new URL(s);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password || !url.hostname) return null;
+  if (k.length < 20 || k.length > 4096 || /\s/.test(k)) return null;
+  return { serverUrl: s.replace(/\/+$/, ""), token: k };
+}
+
+// src/main.ts
 var import_obsidian4 = require("obsidian");
 var import_state = require("@codemirror/state");
 
@@ -1564,20 +1625,23 @@ var LINK_GRAMMAR = {
   "checklist-of": {
     // R-473: direction is task → its checklist.
     label: "Broken down into",
+    // The door's own ends (link-role-ends.ts), held equal by
+    // link-grammar-parity.spec: a whole checklist MODULE is a reader-backed
+    // end (progressFor) the picker never offered.
     from: ["tasks"],
-    to: ["checklist-items"],
+    to: ["modules", "checklist-items"],
     offered: true
   },
   needs: {
     label: "Needs",
     from: ["events", "visits"],
-    to: ["checklist-items", "supplies"],
+    to: ["modules", "checklist-items", "supplies"],
     offered: true
   },
   tracks: {
     // The streak engine's subject: what this goal or habit is counting.
     label: "Tracks",
-    from: ["goals", "habits"],
+    from: ["goals", "habits", "medications"],
     to: "any",
     // Rows 1008/1009 (S-162 F7): a care record is never a streak's subject.
     notTo: CARE_NEVER_SCORED,
@@ -1978,9 +2042,9 @@ var module_names_default = {
     records: "Rows"
   },
   ROTA: {
-    name: "Rota",
-    record: "Duty",
-    records: "Duties"
+    name: "Chores",
+    record: "Chore",
+    records: "Chores"
   },
   PERSON_DETAILS: {
     name: "Person Details",
@@ -2715,6 +2779,21 @@ var CouchDocSync = class {
       return { id: d._id, ok: false, conflict: false, reason: r ? `${r.error}: ${r.reason ?? ""}`.trim() : "no answer for this document" };
     });
   }
+  /** The sequence after `since` when every change since is one of [revs]
+   *  (our own writes), read without the documents; null when any other
+   *  change is in between. */
+  async onlyOwn(since, revs) {
+    let at = since;
+    for (; ; ) {
+      const page = await this.client.changes({ since: at, limit: PULL_PAGE });
+      for (const r of page.results) {
+        if (r.id.startsWith("_design/")) continue;
+        if (!r.changes.every((c) => revs.has(c.rev))) return null;
+      }
+      at = page.lastSeq;
+      if (page.pending <= 0) return at;
+    }
+  }
   /** Live sync's wait: true as soon as anything changes after `since`,
    *  false when `ms` passes with nothing. */
   async wait(since, ms2) {
@@ -2794,6 +2873,7 @@ var NOTE_KEYS = [
   { key: "layout", kind: { kind: "choice", options: ["folder", "single"] }, label: "How a pulled space lands" },
   { key: "hideIds", kind: { kind: "bool" }, label: "Hide sync ids" },
   { key: "autoPush", kind: { kind: "bool" }, label: "Auto-push on save" },
+  { key: "timedPull", kind: { kind: "bool" }, label: "Pull while Obsidian is open" },
   { key: "captureAnyTagged", kind: { kind: "bool" }, label: "Capture any tagged line as a note" },
   { key: "captureTags", kind: { kind: "text" }, label: "Tags that capture a line" },
   { key: "autoCapture", kind: { kind: "bool" }, label: "Capture automatically" },
@@ -3315,7 +3395,7 @@ var CouchNoteTransport = class {
     if (!this.passphrase) {
       throw new NoteSyncRefusal("Enter the encryption passphrase in the Graphite Sync settings. Nothing was sent.");
     }
-    await this.client.ensureDb();
+    if (!await this.client.info()) await this.client.ensureDb();
     let params = await this.client.get(PARAMS_DOC_ID);
     if (!params) {
       const info = await this.client.info();
@@ -3343,7 +3423,13 @@ var CouchNoteTransport = class {
   }
   async pull(cursor) {
     const key = await this.opened();
-    const page = await this.docs.pull(cursor);
+    let page;
+    try {
+      page = await this.docs.pull(cursor);
+    } catch (e) {
+      if (!(cursor && e instanceof CouchError && e.status === 400)) throw e;
+      page = await this.docs.pull(null);
+    }
     const files = [];
     let unreadable = 0;
     for (const d of page.docs) {
@@ -3425,6 +3511,9 @@ var CouchNoteTransport = class {
     const key = await this.opened();
     const id = await key.idFor(path);
     await this.docs.push(versions.map((rev) => ({ _id: id, _rev: rev, _deleted: true })));
+  }
+  skipOwn(cursor, versions) {
+    return this.docs.onlyOwn(cursor, versions);
   }
   wait(cursor, ms2) {
     return this.docs.wait(cursor, ms2);
@@ -3576,6 +3665,8 @@ var utf82 = (bytes) => {
   }
 };
 var emptyNoteSyncState = (target = "") => ({ target, cursor: null, files: {} });
+var SEND_SLICE_DOCS = 100;
+var SEND_SLICE_BYTES = 8 * 1024 * 1024;
 var ZERO = () => ({ received: [], sent: [], trashed: [], conflicts: [], moved: [], merged: [], kept: [], refused: [], unreadable: 0 });
 var pad = (n) => String(n).padStart(2, "0");
 function conflictCopyPath(path, at, taken) {
@@ -3600,6 +3691,9 @@ var NoteSyncEngine = class {
     this.bases = bases;
   }
   report = ZERO();
+  /** The versions this run wrote on the far side, so the cursor can step
+   *  over them rather than wake the live loop for its own push. */
+  wrote = /* @__PURE__ */ new Set();
   /** The base a later merge starts from: the bytes just agreed, for a note;
    *  nothing for a deletion or an attachment. */
   async keepBase(path, content) {
@@ -3609,24 +3703,52 @@ var NoteSyncEngine = class {
   }
   async run() {
     this.report = ZERO();
+    this.wrote = /* @__PURE__ */ new Set();
     await this.receiveAll();
-    const moved = await this.sendChanged();
+    const moved = await this.sendChanged(false);
     if (moved) {
       await this.receiveAll();
-      await this.sendChanged();
+      await this.sendChanged(true);
     }
+    await this.stepOverOwn();
     return this.report;
   }
+  /** Our own pushes are in the changes feed after the cursor; unless the
+   *  cursor steps over them, the live loop wakes for them and runs the whole
+   *  vault again. Only when every change since is one we wrote. */
+  async stepOverOwn() {
+    if (!this.wrote.size || !this.transport.skipOwn) return;
+    try {
+      const at = await this.transport.skipOwn(this.state.cursor, this.wrote);
+      if (at) this.state.cursor = at;
+    } catch {
+    }
+  }
   async receiveAll() {
+    let held = false;
+    let at = this.state.cursor;
     for (; ; ) {
-      const page = await this.transport.pull(this.state.cursor);
+      const page = await this.transport.pull(at);
       this.report.unreadable += page.unreadable ?? 0;
-      const taken = await this.receiveMoves(page.files);
-      for (const f of page.files) {
-        if (!taken.has(f)) await this.receive(f);
-        if (f.others?.length) await this.keepOthers(f);
+      let failed = false;
+      try {
+        const taken = await this.receiveMoves(page.files);
+        for (const f of page.files) {
+          try {
+            if (!taken.has(f)) await this.receive(f);
+            if (f.others?.length) await this.keepOthers(f);
+          } catch (e) {
+            failed = true;
+            this.report.refused.push({ path: f.path, reason: `it could not be written in this vault (${e.message})` });
+          }
+        }
+      } catch (e) {
+        failed = true;
+        this.report.refused.push({ path: "", reason: `a batch of notes could not be taken in (${e.message})` });
       }
-      this.state.cursor = page.cursor;
+      if (failed) held = true;
+      at = page.cursor;
+      if (!held) this.state.cursor = page.cursor;
       if (!page.more) break;
     }
   }
@@ -3676,7 +3798,13 @@ var NoteSyncEngine = class {
     }
     return taken;
   }
-  async receive(remote) {
+  /** True when [path] is no longer what [hash] says it was: he typed (or
+   *  deleted it) between our reading it and our about to write over it. */
+  async drifted(path, hash2) {
+    const now = await this.vault.read(path);
+    return (now ? await sha256Hex(now) : "") !== hash2;
+  }
+  async receive(remote, tries = 0) {
     const path = remote.path;
     if (!inNoteSyncScope(path)) return;
     const rec = this.state.files[path];
@@ -3693,7 +3821,14 @@ var NoteSyncEngine = class {
       return;
     }
     const changedHere = rec ? localHash !== rec.hash : local !== null;
+    const again = async () => {
+      if (!await this.drifted(path, localHash)) return false;
+      if (tries >= 3) throw new Error("it kept changing while it was being written");
+      await this.receive(remote, tries + 1);
+      return true;
+    };
     if (!changedHere) {
+      if (await again()) return;
       if (remote.deleted) {
         if (local) {
           await this.vault.trash(path);
@@ -3713,6 +3848,7 @@ var NoteSyncEngine = class {
       return;
     }
     if (!local) {
+      if (await again()) return;
       await this.vault.write(path, remote.content, remote.mtime);
       agree(remoteHash);
       this.report.kept.push(path);
@@ -3720,6 +3856,7 @@ var NoteSyncEngine = class {
     }
     const merged = await this.mergeBoth(path, local, remote.content);
     if (merged) {
+      if (await again()) return;
       await this.vault.write(path, merged, this.now().getTime());
       agree(remoteHash);
       this.report.merged.push(path);
@@ -3745,6 +3882,17 @@ var NoteSyncEngine = class {
     if (!inNoteSyncScope(path)) return;
     const here = await this.vault.read(path);
     const kept = /* @__PURE__ */ new Set([here ? await sha256Hex(here) : ""]);
+    const dir = path.slice(0, path.lastIndexOf("/") + 1);
+    const name = path.slice(dir.length);
+    const dot = name.lastIndexOf(".");
+    const head = `${dir}${dot > 0 ? name.slice(0, dot) : name} (conflict `;
+    const tail = `)${dot > 0 ? name.slice(dot) : ""}`;
+    for (const f of await this.vault.list()) {
+      if (f.path.startsWith(head) && f.path.endsWith(tail)) {
+        const c = await this.vault.read(f.path);
+        if (c) kept.add(await sha256Hex(c));
+      }
+    }
     for (const o of remote.others ?? []) {
       if (o.deleted || !o.content) continue;
       const h = await sha256Hex(o.content);
@@ -3767,11 +3915,42 @@ var NoteSyncEngine = class {
     const r = mergeLines(b, ours, theirs);
     return r.clean ? new TextEncoder().encode(r.text) : null;
   }
-  /** Send what changed here. True when the far side had moved under a
-   *  send, so the caller takes again before sending again. */
-  async sendChanged() {
-    const out = [];
+  /** Send what changed here, a slice at a time. True when the far side had
+   *  moved under a send, so the caller takes again before sending again;
+   *  `last` is that second try, where a note that still conflicts is said
+   *  (it would otherwise sit unsent with nothing on screen). */
+  async sendChanged(last) {
+    let out = [];
+    let bytes = 0;
+    let moved = false;
     const present = /* @__PURE__ */ new Set();
+    const pace = new Pacer();
+    const flush = async () => {
+      if (!out.length) return;
+      const slice = out;
+      out = [];
+      bytes = 0;
+      const byPath = new Map(slice.map((f) => [f.path, f]));
+      for (const r of await this.transport.push(slice)) {
+        const f = byPath.get(r.path);
+        if (r.ok) {
+          this.state.files[r.path] = { version: r.version, hash: f.hash, ...f.deleted ? {} : { mtime: f.mtime, size: f.content?.length ?? 0 } };
+          this.wrote.add(r.version);
+          await this.keepBase(r.path, f.deleted ? null : f.content);
+          this.report.sent.push(r.path);
+        } else if (r.conflict) {
+          moved = true;
+          if (last) this.report.refused.push({ path: r.path, reason: "the far side holds a version of it that this device cannot take in, so this one could not be sent" });
+        } else {
+          this.report.refused.push({ path: r.path, reason: r.reason });
+        }
+      }
+    };
+    const add = async (f) => {
+      out.push(f);
+      bytes += f.content?.length ?? 0;
+      if (out.length >= SEND_SLICE_DOCS || bytes >= SEND_SLICE_BYTES) await flush();
+    };
     for (const f of await this.vault.list()) {
       if (!inNoteSyncScope(f.path)) continue;
       present.add(f.path);
@@ -3779,32 +3958,26 @@ var NoteSyncEngine = class {
         this.report.refused.push({ path: f.path, reason: `it is ${(f.size / 1048576).toFixed(1)} MB, over the 50 MB that note sync carries` });
         continue;
       }
+      const rec = this.state.files[f.path];
+      if (rec && rec.hash !== "" && f.mtime > 0 && rec.mtime === f.mtime && rec.size === f.size) continue;
+      await pace.tick();
       const content = await this.vault.read(f.path);
       if (!content) continue;
       const hash2 = await sha256Hex(content);
-      const rec = this.state.files[f.path];
-      if (rec && rec.hash === hash2) continue;
-      out.push({ path: f.path, content, mtime: f.mtime, deleted: false, base: rec?.version ?? null, hash: hash2 });
+      if (rec && rec.hash === hash2) {
+        if (f.mtime > 0) {
+          rec.mtime = f.mtime;
+          rec.size = content.length;
+        }
+        continue;
+      }
+      await add({ path: f.path, content, mtime: f.mtime, deleted: false, base: rec?.version ?? null, hash: hash2 });
     }
     for (const [path, rec] of Object.entries(this.state.files)) {
       if (present.has(path) || rec.hash === "" || !inNoteSyncScope(path)) continue;
-      out.push({ path, content: null, mtime: this.now().getTime(), deleted: true, base: rec.version, hash: "" });
+      await add({ path, content: null, mtime: this.now().getTime(), deleted: true, base: rec.version, hash: "" });
     }
-    if (!out.length) return false;
-    const byPath = new Map(out.map((f) => [f.path, f]));
-    let moved = false;
-    for (const r of await this.transport.push(out)) {
-      const f = byPath.get(r.path);
-      if (r.ok) {
-        this.state.files[r.path] = { version: r.version, hash: f.hash };
-        await this.keepBase(r.path, f.deleted ? null : f.content);
-        this.report.sent.push(r.path);
-      } else if (r.conflict) {
-        moved = true;
-      } else {
-        this.report.refused.push({ path: r.path, reason: r.reason });
-      }
-    }
+    await flush();
     return moved;
   }
 };
@@ -3880,6 +4053,7 @@ var DEFAULTS = {
   mirrorAdopted: false,
   bases: {},
   autoPush: false,
+  timedPull: true,
   hideIds: true,
   layout: "folder",
   vaultId: "",
@@ -4272,7 +4446,9 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
     this.statusEl = this.addStatusBarItem();
     this.setStatus("\u2026", "checking");
     this.app.workspace.onLayoutReady(() => {
-      window.setTimeout(() => void this.checkConnection(false), this.startupDelayMs);
+      this.startupTimer = window.setTimeout(() => {
+        if (!this.unloaded) void this.checkConnection(false);
+      }, this.startupDelayMs);
     });
     this.addCommand({ id: "lp-open-panel", name: "Open the sync panel", callback: () => this.openPanel() });
     this.addCommand({ id: "lp-pull-all", name: "Bring in the spaces I mirror", callback: () => void this.mirrorChosenSpaces(true) });
@@ -4300,6 +4476,7 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
       name: "Sync ticks between this vault and Graphite",
       callback: () => void this.syncTicks()
     });
+    this.registerInterval(window.setInterval(() => void this.pullMirroredTick(), _GraphitePlugin.TIMED_PULL_MS));
     this.addCommand({
       id: "lp-publish-agent",
       name: "Publish the routing list and agent brief for your agent",
@@ -4489,6 +4666,11 @@ var GraphitePlugin = class _GraphitePlugin extends import_obsidian4.Plugin {
         this.noteSyncSoon();
         return;
       }
+      if (this.writingBack === 0 && typeof from === "string" && to && this.settings.files[from] && !this.settings.files[to]) {
+        void this.noteRenamed(from, to);
+        this.noteSyncSoon();
+        return;
+      }
       if (typeof from === "string" && this.settings.bases[from] !== void 0) {
         delete this.settings.bases[from];
         void this.saveSettings();
@@ -4600,13 +4782,21 @@ ${problems.join("\n")}`, 12e3);
       const f = vault.getAbstractFileByPath(p);
       return f instanceof import_obsidian4.TFile ? f : null;
     };
+    const quiet = async (fn) => {
+      this.noteSyncWriting++;
+      try {
+        return await fn();
+      } finally {
+        this.noteSyncWriting--;
+      }
+    };
     return {
       list: async () => vault.getFiles().map((f) => ({ path: f.path, mtime: f.stat?.mtime ?? 0, size: f.stat?.size ?? 0 })),
       read: async (p) => {
         const f = fileAt(p);
         return f ? new Uint8Array(await vault.readBinary(f)) : null;
       },
-      write: async (p, content, mtime) => {
+      write: (p, content, mtime) => quiet(async () => {
         const data = content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength);
         const opts = mtime ? { mtime } : void 0;
         const f = fileAt(p);
@@ -4620,16 +4810,16 @@ ${problems.join("\n")}`, 12e3);
           if (!vault.getAbstractFileByPath(d)) await vault.createFolder(d);
         }
         await vault.createBinary(p, data, opts);
-      },
-      trash: async (p) => {
+      }),
+      trash: (p) => quiet(async () => {
         const f = fileAt(p);
         if (f) await vault.trash(f, false);
-      },
+      }),
       // Row 2375: a rename from another device is a move here. vault.rename,
       // not fileManager.renameFile: the notes that linked to it were updated
       // on the device that renamed it and arrive as their own edits, so
       // rewriting them here as well would make a second, competing edit.
-      rename: async (from, to) => {
+      rename: (from, to) => quiet(async () => {
         const f = fileAt(from);
         if (!f) return;
         const dir = to.split("/").slice(0, -1);
@@ -4638,7 +4828,7 @@ ${problems.join("\n")}`, 12e3);
           if (!vault.getAbstractFileByPath(d)) await vault.createFolder(d);
         }
         await vault.rename(f, to);
-      }
+      })
     };
   }
   /** ROW 2375 (R-5254): the text each note last agreed with [target] — the
@@ -4696,6 +4886,18 @@ ${p}`))}`;
   }
   /** The last thing note sync said, for the settings screen. */
   noteSyncLast = "";
+  /** Why the last run did not complete, empty when it did: the live loop
+   *  reads it to back off and to say so on the badge. */
+  noteSyncWhy = "";
+  /** Files note sync is writing this instant; its own events are not changes. */
+  noteSyncWriting = 0;
+  /** What was said about a failure, so a run that fails the same way again
+   *  (the live loop tries every few seconds) does not say it again. */
+  noteSyncSaid = /* @__PURE__ */ new Set();
+  /** A settings field was edited and the restart is waiting for stillness. */
+  noteSyncRestartWanted = false;
+  /** How still the settings screen must be before note sync restarts. */
+  noteSyncRestartDelay = 1500;
   follower = null;
   /** Run note sync now. Null when it is off, refused, or failed (each said);
    *  otherwise what moved. A run asked for while one is going runs once
@@ -4723,12 +4925,29 @@ ${p}`))}`;
     }
   }
   async noteSyncOnce(opts) {
-    const say = (text, ms2 = 8e3) => {
+    const now = /* @__PURE__ */ new Set();
+    this.noteSyncWhy = "";
+    try {
+      return await this.noteSyncRun(opts, now);
+    } finally {
+      this.noteSyncSaid = now;
+    }
+  }
+  async noteSyncRun(opts, now) {
+    const say = (text, ms2 = 8e3, failure = true) => {
       this.noteSyncLast = text;
+      if (failure) {
+        now.add(text);
+        if (!opts.loud && this.noteSyncSaid.has(text)) return;
+      }
       new import_obsidian4.Notice(`Graphite: ${text}`, ms2);
     };
+    const fail = (text, ms2 = 12e3) => {
+      this.noteSyncWhy = text;
+      say(text, ms2);
+    };
     if (this.liveSyncPluginOn()) {
-      say("note sync did not start, because LiveSync is on in this vault. Turn LiveSync off first: two sync engines in one vault lose notes.", 12e3);
+      fail("note sync did not start, because LiveSync is on in this vault. Turn LiveSync off first: two sync engines in one vault lose notes.");
       return null;
     }
     const s = this.settings;
@@ -4736,7 +4955,7 @@ ${p}`))}`;
     try {
       await transport.open();
     } catch (e) {
-      say(e.message, 12e3);
+      fail(e.message);
       return null;
     }
     const target = `${s.couchUrl.trim().replace(/\/+$/, "")}|${s.couchDb}|${transport.identity}`;
@@ -4752,19 +4971,19 @@ ${p}`))}`;
     try {
       report = await engine.run();
     } catch (e) {
-      say(`note sync stopped: ${e.message}`, 12e3);
+      fail(`note sync stopped: ${e.message}`);
       return null;
     } finally {
       await this.saveData(this.settings);
     }
     for (const c of report.conflicts) {
-      say(`${c.path} was changed on this device and on another. Both are kept: the other version is beside it as ${c.copy}.`, 15e3);
+      say(`${c.path} was changed on this device and on another. Both are kept: the other version is beside it as ${c.copy}.`, 15e3, false);
     }
     for (const m of report.merged) {
-      say(`${m} was changed on this device and on another, in different places. Both edits are kept in it.`, 12e3);
+      say(`${m} was changed on this device and on another, in different places. Both edits are kept in it.`, 12e3, false);
     }
-    for (const r of report.refused) say(`${r.path} was not synced: ${r.reason}.`, 12e3);
-    for (const k of report.kept) say(`${k} was deleted on one device and edited on another; the edited version is kept.`, 12e3);
+    for (const r of report.refused) say(`${r.path ? `${r.path} was not synced` : "Some notes were not synced"}: ${r.reason}.`, 12e3);
+    for (const k of report.kept) say(`${k} was deleted on one device and edited on another; the edited version is kept.`, 12e3, false);
     if (report.unreadable) {
       say(`${report.unreadable} document${report.unreadable === 1 ? "" : "s"} in the database could not be opened with this passphrase and ${report.unreadable === 1 ? "was" : "were"} left alone.`, 12e3);
     }
@@ -4778,9 +4997,36 @@ ${p}`))}`;
   }
   /** A vault change: sent once the vault has been still for a moment. */
   noteSyncSoon() {
-    if (this.settings.noteSync === "off") return;
+    if (this.settings.noteSync === "off" || this.noteSyncWriting > 0) return;
     window.clearTimeout(this.noteSyncTimer);
-    this.noteSyncTimer = window.setTimeout(() => void this.syncNotesNow(), this.noteSyncDelay);
+    this.noteSyncTimer = window.setTimeout(() => {
+      if (this.noteSyncRestartWanted) this.restartNoteSyncNow();
+      else void this.syncNotesNow();
+    }, this.noteSyncDelay);
+  }
+  /** A note-sync field in the settings screen was edited. Every keystroke is
+   *  an edit, and a restart runs a sync at once: the first letter of a
+   *  passphrase would make the database under that letter, and each prefix
+   *  of an address would be sent the user name and password. So the restart
+   *  waits for the screen to be still (or the field to be left). It rides
+   *  the vault's own timer, which unload already stops. */
+  restartNoteSyncSoon(opts = {}) {
+    this.noteSyncRestartWanted = true;
+    window.clearTimeout(this.noteSyncTimer);
+    if (opts.now) {
+      this.restartNoteSyncNow();
+      return;
+    }
+    this.noteSyncTimer = window.setTimeout(() => this.restartNoteSyncNow(), this.noteSyncRestartDelay);
+  }
+  /** A field was left: a waiting restart goes now. */
+  flushNoteSyncRestart() {
+    if (this.noteSyncRestartWanted) this.restartNoteSyncNow();
+  }
+  restartNoteSyncNow() {
+    window.clearTimeout(this.noteSyncTimer);
+    this.noteSyncRestartWanted = false;
+    this.restartNoteSync();
   }
   /** Live sync on or off, to match the settings. Called at start-up and
    *  whenever a note-sync setting changes. */
@@ -4802,7 +5048,7 @@ ${p}`))}`;
       this.follower = new LiveFollower(transport, {
         since: this.settings.noteSyncState.cursor,
         onChange: async () => {
-          await this.syncNotesNow();
+          if (await this.syncNotesNow() === null) throw new Error(this.noteSyncWhy || "note sync did not run");
           return this.settings.noteSyncState.cursor;
         },
         onState: (state, detail) => {
@@ -4822,7 +5068,17 @@ ${p}`))}`;
     Object.values(this.pushTimers).forEach((t) => window.clearTimeout(t));
     Object.values(this.tickTimers).forEach((t) => window.clearTimeout(t));
     Object.values(this.gestureTimers).forEach((t) => window.clearTimeout(t));
+    this.unloaded = true;
+    window.clearTimeout(this.startupTimer);
+    window.clearTimeout(this.mirrorTimer);
+    this.mirrorTimer = 0;
+    window.clearTimeout(this.vanishTimer);
+    window.clearTimeout(this.settingsNoteTimer);
+    Object.values(this.autoCaptureTimers).forEach((t) => window.clearTimeout(t));
   }
+  /** Set once the plugin has been unloaded: whatever is still waiting stops. */
+  unloaded = false;
+  startupTimer = 0;
   /* ══ THIS DEVICE ═════════════════════════════════════════════════════════
    *
    * One switch, `source`, says whether this vault gets Graphite from a server
@@ -4948,6 +5204,37 @@ ${p}`))}`;
   /** The app on this computer said it lets notes apps read and not change.
    *  Remembered so an auto-push does not say it again on every edit. */
   computerReadOnly = false;
+  /** R-490: WHEN THE APP LAST SAID NO. One refusal held every later auto-push
+   *  silent until the person pressed Test connection, so switching "let notes
+   *  apps change Graphite" on in the app seemed to do nothing. It now holds for
+   *  a minute and the next edit asks the app again. */
+  computerReadOnlyAt = 0;
+  computerReadOnlyNow() {
+    return this.computerReadOnly && Date.now() - this.computerReadOnlyAt < 6e4;
+  }
+  noteComputerAnswer(status) {
+    this.computerReadOnly = status === 403;
+    if (this.computerReadOnly) this.computerReadOnlyAt = Date.now();
+  }
+  /** R-521: trade a pairing code for the plugin key. No key is sent (there is none yet); the one
+   *  sentence the server refuses with is passed on as it is. */
+  async redeemPairingCode(code2) {
+    try {
+      const res = await (0, import_obsidian4.requestUrl)({
+        url: this.api("/auth/pairing-code/redeem"),
+        method: "POST",
+        contentType: "application/json",
+        body: JSON.stringify({ code: code2 }),
+        throw: false
+      });
+      const token = res.json?.token;
+      if (res.status < 300 && typeof token === "string" && token) return { token, said: "" };
+      const why = res.json?.message;
+      return { said: typeof why === "string" && why ? why : `the server answered ${res.status}.` };
+    } catch {
+      return { said: "the server could not be reached. Check the address." };
+    }
+  }
   api(path) {
     const base = this.onDevice ? NO_SERVER : this.onComputer ? this.endpoint()?.base ?? NO_DOOR : this.settings.serverUrl.replace(/\/+$/, "");
     return `${base}/api${path}`;
@@ -5051,6 +5338,7 @@ ${p}`))}`;
       window.clearTimeout(this.mirrorTimer);
       this.mirrorTimer = window.setTimeout(() => {
         this.mirrorTimer = 0;
+        if (this.unloaded) return;
         void this.mirrorChosenSpaces(false);
       }, this.firstMirrorDelayMs);
       return true;
@@ -5411,25 +5699,23 @@ ${p}`))}`;
         }
       }
       if (!stamps.size) continue;
-      const current = await this.app.vault.read(file);
-      const now = current.split("\n");
-      for (const [at, id] of stamps) {
-        const was = lines[at];
-        const here = now[at] === was ? at : now.indexOf(was);
-        if (here < 0) {
-          lost++;
-          continue;
-        }
-        now[here] = stampCaptured(now[here], id);
-      }
-      const next = now.join("\n");
-      if (next !== current) {
-        this.writingBack++;
-        try {
-          await this.app.vault.modify(file, next);
-        } finally {
-          this.writingBack--;
-        }
+      this.writingBack++;
+      try {
+        await this.app.vault.process(file, (current) => {
+          const now = current.split("\n");
+          for (const [at, id] of stamps) {
+            const was = lines[at];
+            const here = now[at] === was ? at : now.indexOf(was);
+            if (here < 0) {
+              lost++;
+              continue;
+            }
+            now[here] = stampCaptured(now[here], id);
+          }
+          return now.join("\n");
+        });
+      } finally {
+        this.writingBack--;
       }
     }
     const said = [
@@ -5587,26 +5873,33 @@ ${lineWarnings.slice(0, 6).join("\n")}`, 15e3);
     for (const id of toLine.keys()) for (const p of where.get(id) ?? []) touched.add(p);
     for (const p of touched) {
       const file = files.find((f) => f.path === p);
-      const current = await this.app.vault.read(file);
-      const lines = current.split("\n");
-      for (const t of tickLines(current)) {
-        const want = toLine.get(t.id);
-        if (want === void 0 || t.state === want) continue;
-        if (t.state !== local.get(t.id)) {
-          restore(t.id);
-          continue;
-        }
-        lines[t.at] = withTick(lines[t.at], want);
-        ticked++;
+      const before = await this.app.vault.read(file);
+      const open = tickLines(before).filter((x) => {
+        const want = toLine.get(x.id);
+        return want !== void 0 && x.state !== want;
+      });
+      if (!open.some((x) => x.state === local.get(x.id))) {
+        for (const x of open) restore(x.id);
+        continue;
       }
-      const next = lines.join("\n");
-      if (next !== current) {
-        this.writingBack++;
-        try {
-          await this.app.vault.modify(file, next);
-        } finally {
-          this.writingBack--;
-        }
+      this.writingBack++;
+      try {
+        await this.app.vault.process(file, (current) => {
+          const lines = current.split("\n");
+          for (const t of tickLines(current)) {
+            const want = toLine.get(t.id);
+            if (want === void 0 || t.state === want) continue;
+            if (t.state !== local.get(t.id)) {
+              restore(t.id);
+              continue;
+            }
+            lines[t.at] = withTick(lines[t.at], want);
+            ticked++;
+          }
+          return lines.join("\n");
+        });
+      } finally {
+        this.writingBack--;
       }
     }
     this.settings.ticks = agreed;
@@ -5742,16 +6035,22 @@ ${lineWarnings.slice(0, 6).join("\n")}`, 15e3);
     const folder = path.slice(0, path.lastIndexOf("/"));
     if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
     const existing = this.app.vault.getAbstractFileByPath(path);
+    let wrote = false;
     this.writingBack++;
     try {
       if (existing instanceof import_obsidian4.TFile) {
-        if (await this.app.vault.read(existing) !== text) await this.app.vault.modify(existing, text);
+        if (await this.app.vault.read(existing) !== text) {
+          await this.app.vault.process(existing, () => text);
+          wrote = true;
+        }
       } else {
         await this.app.vault.create(path, text);
+        wrote = true;
       }
     } finally {
       this.writingBack--;
     }
+    if (wrote) this.noteSyncSoon();
   }
   /* ══ OC4 · THE ONE TRANSITION ALL FOUR APPROVALS CALL ═══════════════════
    *
@@ -5826,20 +6125,23 @@ ${lineWarnings.slice(0, 6).join("\n")}`, 15e3);
       if (key) made.set(key, c.id);
     }
     const refusedLines = res.json?.refused ?? [];
-    const now = (await this.app.vault.read(file)).split("\n");
     let lost = 0;
-    for (const [key, id] of made) {
-      const at = lineOfKey(now, key);
-      if (at < 0) {
-        lost++;
-        continue;
-      }
-      now[at] = finalised(now[at], id);
-    }
     if (made.size) {
       this.writingBack++;
       try {
-        await this.app.vault.modify(file, now.join("\n"));
+        await this.app.vault.process(file, (cur) => {
+          const now = cur.split("\n");
+          lost = 0;
+          for (const [key, id] of made) {
+            const at = lineOfKey(now, key);
+            if (at < 0) {
+              lost++;
+              continue;
+            }
+            now[at] = finalised(now[at], id);
+          }
+          return now.join("\n");
+        });
       } finally {
         this.writingBack--;
       }
@@ -6294,6 +6596,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       if (opts.loud) new import_obsidian4.Notice("Graphite: could not reach Graphite to refresh the picker lists, so the file stands as it was.");
       return;
     }
+    if (this.unloaded) return;
     if (before && sameLists(before, this.settings.toolbarCache)) this.settings.toolbarCache = before;
     await this.writeSharedJson(TOOLBAR_LISTS_PATH, listsFile(this.settings.toolbarCache));
     if (opts.loud) new import_obsidian4.Notice(`Graphite: wrote the picker lists to ${TOOLBAR_LISTS_PATH} (${this.settings.toolbarCache.spaces.length} spaces).`);
@@ -6308,7 +6611,7 @@ ${block.join("\n")}`, { line, ch: old.length });
     try {
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (existing instanceof import_obsidian4.TFile) {
-        if (await this.app.vault.read(existing) !== text) await this.app.vault.modify(existing, text);
+        if (await this.app.vault.read(existing) !== text) await this.app.vault.process(existing, () => text);
         return;
       }
       const had = await this.app.vault.adapter.read(path).catch(() => null);
@@ -6752,7 +7055,7 @@ ${block.join("\n")}`, { line, ch: old.length });
           headers: this.headers,
           throw: false
         });
-        if (res.status >= 500) reached = false;
+        if (res.status >= 500 || res.status === 401 || res.status === 403 || res.status === 404) reached = false;
       } catch {
         reached = false;
       }
@@ -6792,7 +7095,7 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  different thing (the server writing a folder of its own) and is neither
    *  read nor changed here. */
   async mirrorChosenSpaces(loud) {
-    if (this.offServer || !this.configured) return 0;
+    if (this.unloaded || this.offServer || !this.configured) return 0;
     if (this.mirroring && !loud) return 0;
     while (this.mirroring) await new Promise((r) => window.setTimeout(r, 50));
     this.mirroring = true;
@@ -6819,6 +7122,7 @@ ${block.join("\n")}`, { line, ch: old.length });
         for (let i = 0; i < todo.length; i++) {
           const sp = todo[i];
           if (i > 0 && this.spaceGapMs > 0) await new Promise((r) => window.setTimeout(r, this.spaceGapMs));
+          if (this.unloaded) break;
           await this.pullSpace(sp);
           if (this.entriesForSpace(sp.id).length > 0) {
             brought++;
@@ -6996,6 +7300,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       };
       const writeNote = (rel, markdown) => {
         const target = p.join(dest.path, rel);
+        fs.mkdirSync(p.dirname(target), { recursive: true });
         let existing = null;
         try {
           existing = fs.readFileSync(target, "utf8");
@@ -7021,7 +7326,8 @@ ${block.join("\n")}`, { line, ch: old.length });
             folder: out.folder,
             ...asked ? { folderAsked: asked } : {},
             role: f.kind,
-            moduleId: f.moduleId
+            moduleId: f.moduleId,
+            ...f.kind === "page" ? { noteId: f.noteId, pageDir: notebookDirOf(f.path, f.markdown) } : {}
           });
         }
         note = `pulled "${space.name}" into vault "${dest.name}" as a folder of ${out.files.length} notes`;
@@ -7108,27 +7414,96 @@ ${block.join("\n")}`, { line, ch: old.length });
   }
   /** moduleIds: undefined = keep the file's stored filter (plain re-pull);
    *  null = explicit "all modules" (clears the filter); array = subset. */
-  async pullSpace(space, moduleIds, moduleCount) {
-    if (this.settings.layout === "folder") {
-      return this.pullFolder(space, moduleIds, moduleCount);
+  /** R-490: ONE PULL OF A SPACE AT A TIME. Two that overlap (the bring-in at
+   *  start-up and a press of Pull, or a double press) both saw "no file yet"
+   *  and both created it, and the second said "File already exists". The
+   *  second now waits for the first and then runs, so a selection chosen in
+   *  between is still honoured. */
+  pulls = /* @__PURE__ */ new Map();
+  async pullSpace(space, moduleIds, moduleCount, timed) {
+    const before = this.pulls.get(space.id) ?? Promise.resolve();
+    const mine = before.then(() => this.pullSpaceNow(space, moduleIds, moduleCount, timed));
+    const tail = mine.catch(() => void 0);
+    this.pulls.set(space.id, tail);
+    try {
+      await mine;
+    } finally {
+      if (this.pulls.get(space.id) === tail) this.pulls.delete(space.id);
     }
-    const fileName = singleFileFor(this.settings.files, space);
-    const prev = this.settings.files[fileName];
+  }
+  /** R-490: WRITE A PULLED TEXT OVER A NOTE WITHOUT LOSING WHAT WAS TYPED.
+   *  The file is read and written in ONE step (vault.process runs on the file
+   *  as it is at that moment), so keystrokes that land between a read and a
+   *  write are seen. Then the three cases a pull has:
+   *   - only the app moved: the app's text lands (the usual pull);
+   *   - only the vault moved (typed and not yet pushed, the app unchanged):
+   *     there is nothing to bring in, so the note is LEFT AS TYPED and stays
+   *     "local edits" - the pull used to write the app's old text over it;
+   *   - both moved: the typed version is banked beside the note first. */
+  async writePulled(file, before, incoming, timed) {
+    const old = await this.app.vault.read(file);
+    if (timed) {
+      const synced = before?.lastHash;
+      const localMoved = !synced || hash(old) !== synced;
+      const serverMoved = !synced || hash(keepFreeform(old, incoming)) !== synced;
+      if (localMoved || !serverMoved) {
+        if (localMoved && serverMoved) timed.skipped.push(file.path);
+        return { text: old, kept: true, banked: null };
+      }
+    }
+    let banked = this.bothMoved(before, old, incoming) ? await this.bankConflictCopy(file.path, old) : null;
+    let late = null;
+    let text = incoming;
+    let kept = false;
+    await this.app.vault.process(file, (cur) => {
+      if (cur !== old) late = cur;
+      if (timed && cur !== old) {
+        kept = true;
+        text = cur;
+        timed.skipped.push(file.path);
+        return cur;
+      }
+      if (this.vaultOnlyMoved(before, cur, incoming)) {
+        kept = true;
+        text = cur;
+        return cur;
+      }
+      text = keepFreeform(cur, incoming);
+      return text;
+    });
+    if (late !== null && !kept && this.bothMoved(before, late, incoming)) {
+      banked = await this.bankConflictCopy(file.path, late);
+    }
+    return { text, kept, banked };
+  }
+  async pullSpaceNow(space, moduleIds, moduleCount, timed) {
+    if (this.settings.layout === "folder") {
+      return this.pullFolder(space, moduleIds, moduleCount, timed);
+    }
+    let fileName = singleFileFor(this.settings.files, space);
+    const had = this.entriesForSpace(space.id).find((p) => !p.entry.role);
+    if (had && had.path !== fileName) {
+      this.writingBack++;
+      let moved = false;
+      try {
+        moved = await this.renameTo(had.path, fileName);
+      } finally {
+        this.writingBack--;
+      }
+      if (!moved) fileName = had.path;
+    }
+    const prev = this.settings.files[fileName] ?? had?.entry;
     const effective = moduleIds === void 0 ? prev?.moduleIds : moduleIds === null ? void 0 : moduleIds;
     try {
       const md = await (0, import_obsidian4.requestUrl)({ url: this.exportUrl(space.id, effective), headers: this.headers });
       this.writingBack++;
       let text = md.text;
       let banked = null;
+      let kept = false;
       try {
         const existing = this.app.vault.getAbstractFileByPath(fileName);
         if (existing instanceof import_obsidian4.TFile) {
-          const old = await this.app.vault.read(existing);
-          if (this.bothMoved(prev, old, md.text)) {
-            banked = await this.bankConflictCopy(fileName, old);
-          }
-          text = keepFreeform(old, md.text);
-          await this.app.vault.modify(existing, text);
+          ({ text, kept, banked } = await this.writePulled(existing, prev, md.text, timed));
         } else await this.app.vault.create(fileName, text);
       } finally {
         this.writingBack--;
@@ -7143,17 +7518,19 @@ ${block.join("\n")}`, { line, ch: old.length });
         spaceId: space.id,
         spaceName: space.name,
         lastSyncAt: Date.now(),
-        lastHash: hash(text),
+        // A note left as typed still says what the SERVER last wrote.
+        lastHash: kept && prev?.lastHash ? prev.lastHash : hash(text),
         moduleIds: effective,
         moduleCount: moduleCount ?? prev?.moduleCount
       };
-      putBase(this.settings.bases, fileName, text);
+      if (!kept) putBase(this.settings.bases, fileName, text);
       await this.saveSettings();
+      await this.rearmAutoPush([fileName]);
       if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
       if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope}.`);
     } catch (e) {
-      new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${pullFailedWords(e)}`);
+      if (!timed) new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${pullFailedWords(e)}`);
     }
   }
   /** R-379: pull a space as a FOLDER of notes — the index plus one note per
@@ -7172,7 +7549,7 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  • A REMOVED MODULE IS UNTRACKED, NEVER DELETED. Its note stays in the
    *    vault as an ordinary file and the panel stops claiming it is synced.
    *    Deleting a user's file is not the sync's decision to make. */
-  async pullFolder(space, moduleIds, moduleCount) {
+  async pullFolder(space, moduleIds, moduleCount, timed) {
     const previous = this.entriesForSpace(space.id);
     const stored = previous.find((p) => p.entry.moduleIds)?.entry.moduleIds;
     const effective = moduleIds === void 0 ? stored : moduleIds === null ? void 0 : moduleIds;
@@ -7195,20 +7572,21 @@ ${block.join("\n")}`, { line, ch: old.length });
         for (const f of out.files) {
           await pace.tick();
           await this.ensureDirs(f.path);
-          const was = previous.find((p) => p.path !== f.path && (f.kind === "page" ? p.entry.role === "page" && p.entry.noteId === f.noteId : f.kind === "module" ? p.entry.role !== "page" && p.entry.moduleId === f.moduleId : p.entry.role === "index"));
-          if (was) {
-            await this.renameTo(was.path, f.path);
-            renamed.add(was.path);
-          }
+          const wasAt = previous.find((p) => p.path !== f.path && (f.kind === "page" ? p.entry.role === "page" && p.entry.noteId === f.noteId : f.kind === "module" ? p.entry.role !== "page" && p.entry.moduleId === f.moduleId : p.entry.role === "index"));
+          if (wasAt && await this.renameTo(wasAt.path, f.path)) renamed.add(wasAt.path);
           const existing = this.app.vault.getAbstractFileByPath(f.path);
-          const old = existing instanceof import_obsidian4.TFile ? await this.app.vault.read(existing) : null;
-          const before = previous.find((p) => p.path === f.path)?.entry ?? was?.entry;
-          if (old !== null && this.bothMoved(before, old, f.markdown)) {
-            banked.push(await this.bankConflictCopy(f.path, old));
+          const before = previous.find((p) => p.path === f.path)?.entry ?? wasAt?.entry;
+          let text;
+          let kept = false;
+          if (existing instanceof import_obsidian4.TFile) {
+            const done = await this.writePulled(existing, before, f.markdown, timed);
+            text = done.text;
+            kept = done.kept;
+            if (done.banked) banked.push(done.banked);
+          } else {
+            text = keepFreeform(null, f.markdown);
+            await this.app.vault.create(f.path, text);
           }
-          const text = keepFreeform(old, f.markdown);
-          if (existing instanceof import_obsidian4.TFile) await this.app.vault.modify(existing, text);
-          else await this.app.vault.create(f.path, text);
           this.settings.files[f.path] = {
             spaceId: space.id,
             spaceName: space.name,
@@ -7218,11 +7596,12 @@ ${block.join("\n")}`, { line, ch: old.length });
             moduleId: f.moduleId,
             ...f.kind === "page" ? { noteId: f.noteId, pageDir: notebookDirOf(f.path, f.markdown) } : {},
             lastSyncAt: Date.now(),
-            lastHash: hash(text),
+            // A note left as typed still says what the server last wrote.
+            lastHash: kept && before?.lastHash ? before.lastHash : hash(text),
             moduleIds: effective,
             moduleCount: moduleCount ?? previous[0]?.entry.moduleCount
           };
-          putBase(this.settings.bases, f.path, text);
+          if (!kept) putBase(this.settings.bases, f.path, text);
           written.add(f.path);
         }
       } finally {
@@ -7255,6 +7634,7 @@ ${block.join("\n")}`, { line, ch: old.length });
         delete this.settings.bases[d.path];
       }
       await this.saveSettings();
+      await this.rearmAutoPush([...written]);
       if (!this.quietPulls) this.refreshPanel();
       const scope = effective?.length ? ` (${effective.length} module${effective.length === 1 ? "" : "s"})` : "";
       if (!this.quietPulls) new import_obsidian4.Notice(`Graphite: pulled "${space.name}"${scope} into ${out.folder}/ \u2014 ${out.files.length} note${out.files.length === 1 ? "" : "s"}.`);
@@ -7277,8 +7657,60 @@ ${block.join("\n")}`, { line, ch: old.length });
         );
       }
     } catch (e) {
-      new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${pullFailedWords(e)}`);
+      if (!timed) new import_obsidian4.Notice(`Graphite: pull failed \u2014 ${pullFailedWords(e)}`);
     }
+  }
+  /** R-165 (Omar, 2026-11-24, "pull every few minutes while Obsidian is
+   *  open"): five minutes. The interval is the plugin's, not a setting: a
+   *  look is one export request per mirrored space, to the person's own
+   *  server and nowhere else. */
+  static TIMED_PULL_MS = 5 * 6e4;
+  timedPulling = false;
+  /** Notes already said to be left alone, so the same one is not said again
+   *  at every look; one that stops being skipped is forgotten. */
+  timedSkipTold = /* @__PURE__ */ new Set();
+  /** One look at the spaces this vault mirrors: what changed in Graphite comes
+   *  in, a note edited here is never overwritten and is said once. Returns the
+   *  notes it left alone. Not run while a pull, a bring-in or a write-back is
+   *  in progress, off the server, unconfigured or switched off. */
+  async pullMirroredTick() {
+    if (this.unloaded || this.offServer || !this.configured || this.settings.timedPull === false) return [];
+    if (this.timedPulling || this.mirroring || this.writingBack > 0 || this.mirrorTimer) return [];
+    this.timedPulling = true;
+    const timed = { skipped: [] };
+    this.quietPulls++;
+    try {
+      let spaces;
+      let choices;
+      try {
+        spaces = await this.fetchSpaces();
+        choices = await this.fetchMirrorChoices();
+      } catch {
+        return [];
+      }
+      if (!choices) return [];
+      await this.mirrorChosenSpaces(false);
+      for (const sp of spaces) {
+        if (this.unloaded) break;
+        if (choices.get(sp.id)?.state !== "on" || this.entriesForSpace(sp.id).length === 0) continue;
+        await this.pullSpace(sp, void 0, void 0, timed);
+      }
+    } finally {
+      this.quietPulls--;
+      this.timedPulling = false;
+      this.refreshPanel();
+    }
+    const now = new Set(timed.skipped);
+    for (const p of [...this.timedSkipTold]) if (!now.has(p)) this.timedSkipTold.delete(p);
+    const fresh = timed.skipped.filter((p) => !this.timedSkipTold.has(p));
+    fresh.forEach((p) => this.timedSkipTold.add(p));
+    if (fresh.length) {
+      new import_obsidian4.Notice(
+        `Graphite: ${fresh.length} note${fresh.length === 1 ? "" : "s"} changed in Graphite ${fresh.length === 1 ? "was" : "were"} left alone because you edited ${fresh.length === 1 ? "it" : "them"} here: ${fresh.join(", ")}. Push your edits, or pull the space yourself to merge (your version is banked beside it first).`,
+        12e3
+      );
+    }
+    return timed.skipped;
   }
   /** Obsidian's own trash, as the vault is set to use it (the file manager's),
    *  or the vault's .trash on an Obsidian that has no such call. */
@@ -7320,7 +7752,7 @@ ${block.join("\n")}`, { line, ch: old.length });
   async deleteGonePage(path, entry, opts) {
     if (!entry.moduleId || !entry.noteId) return;
     if (!await this.writeAllowed("deleted", !opts?.auto)) return;
-    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
+    if (this.onComputer && opts?.auto && this.computerReadOnlyNow()) return;
     const title = path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
     const dir = entry.pageDir ?? "";
     for (const f of this.app.vault.getMarkdownFiles()) {
@@ -7336,7 +7768,7 @@ ${block.join("\n")}`, { line, ch: old.length });
       headers: this.headers,
       throw: false
     });
-    if (this.onComputer) this.computerReadOnly = res.status === 403;
+    if (this.onComputer) this.noteComputerAnswer(res.status);
     if (res.status < 300 || res.status === 404) {
       delete this.settings.files[path];
       delete this.settings.bases[path];
@@ -7370,6 +7802,20 @@ ${block.join("\n")}`, { line, ch: old.length });
    *  it in the vault's other files; Graphite rewrites its own on the title
    *  change. Not the plugin's own renames (a pull moving a page that was
    *  renamed in Graphite), which come through with writingBack up. */
+  async noteRenamed(from, to) {
+    const entry = this.settings.files[from];
+    if (!entry || this.settings.files[to]) return;
+    window.clearTimeout(this.pushTimers[from]);
+    delete this.pushTimers[from];
+    this.settings.files[to] = { ...entry };
+    delete this.settings.files[from];
+    const base = this.settings.bases[from];
+    delete this.settings.bases[from];
+    if (base !== void 0) putBase(this.settings.bases, to, base);
+    await this.saveSettings();
+    this.refreshPanel();
+    if (this.settings.autoPush && await this.fileState(to) === "local-edits") this.schedulePush(to);
+  }
   async pageRenamed(from, to) {
     const entry = this.settings.files[from];
     if (!entry || entry.role !== "page" || this.settings.files[to]) return;
@@ -7405,13 +7851,27 @@ ${block.join("\n")}`, { line, ch: old.length });
   /** Rename through fileManager so Obsidian rewrites links pointing at it. */
   async renameTo(from, to) {
     const file = this.app.vault.getAbstractFileByPath(from);
-    if (!(file instanceof import_obsidian4.TFile)) return;
-    if (this.app.vault.getAbstractFileByPath(to)) return;
+    if (!(file instanceof import_obsidian4.TFile)) return false;
+    if (this.app.vault.getAbstractFileByPath(to)) return false;
     try {
       await this.app.fileManager.renameFile(file, to);
       delete this.settings.files[from];
       delete this.settings.bases[from];
+      return true;
     } catch {
+    }
+    return false;
+  }
+  /** R-490: AFTER A PULL, WHAT WAS TYPED WHILE IT RAN IS SENT. A pull holds
+   *  writingBack for its whole run so its own writes are not mistaken for
+   *  edits, and that also hid the person's keystrokes in a note the pull had
+   *  already written: they never reached auto-push and sat as "local edits".
+   *  Once the run is over, every note it touched that differs from what the
+   *  server last wrote is scheduled. */
+  async rearmAutoPush(paths) {
+    if (!this.settings.autoPush) return;
+    for (const p of paths) {
+      if (this.settings.files[p] && await this.fileState(p) === "local-edits") this.schedulePush(p);
     }
   }
   async pushCurrent() {
@@ -7454,6 +7914,44 @@ ${block.join("\n")}`, { line, ch: old.length });
       await this.pushFile(path, again);
     }
   }
+  /** R-490: A PUSH THAT DID NOT GET THROUGH IS TRIED AGAIN, AND SAID.
+   *  An auto-push that failed (a server error, a dropped connection) gave one
+   *  Notice and was then forgotten: the edit sat unsent until the person typed
+   *  again, and the status bar stayed green because it is set by the connection
+   *  check, which runs once. A failure the server may recover from is armed
+   *  again after 5, 20 and 60 seconds; one it would repeat (refused, too big,
+   *  not signed in) is not, but the status bar says it. */
+  pushTries = {};
+  pushBad = /* @__PURE__ */ new Set();
+  pushRetryMs = [5e3, 2e4, 6e4];
+  pushFailed(path, opts, kind, why) {
+    this.pushBad.add(path);
+    const name = path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+    if (kind === "again" && opts?.auto) {
+      const n = this.pushTries[path] ?? 0;
+      if (n < this.pushRetryMs.length) {
+        this.pushTries[path] = n + 1;
+        window.clearTimeout(this.pushTimers[path]);
+        this.pushTimers[path] = window.setTimeout(
+          () => void this.pushFile(path, { auto: true }),
+          this.pushRetryMs[n]
+        );
+        this.setStatus(`${why}; will try "${name}" again`, "bad");
+        return;
+      }
+    }
+    this.setStatus(`${why}: "${name}" is not sent`, "bad");
+  }
+  /** A push got through: what failed before is no longer failing, and the
+   *  status bar goes back to the connection's own words. */
+  pushWorked(path) {
+    delete this.pushTries[path];
+    if (!this.pushBad.delete(path) || this.pushBad.size > 0) return;
+    const who = this.onComputer ? "this computer" : this.lastMe?.name ?? this.lastMe?.email ?? "connected";
+    this.setStatus(who, "ok");
+  }
+  /** How long the read-back after an accepted push waits between tries. */
+  canonRetryMs = 1500;
   async pushFileNow(path, opts) {
     if (this.onDevice) return;
     const entry = this.settings.files[path];
@@ -7463,8 +7961,17 @@ ${block.join("\n")}`, { line, ch: old.length });
       return;
     }
     if (!entry || !(file instanceof import_obsidian4.TFile)) return;
+    if (entry.landedUnread) {
+      if (!opts?.auto) {
+        new import_obsidian4.Notice(
+          `Graphite: "${entry.spaceName ?? path}" was sent, but the answer could not be read back, so it is not sent again until you Pull. A Pull brings in what Graphite holds and keeps your version beside it.`,
+          12e3
+        );
+      }
+      return;
+    }
     if (!await this.writeAllowed("pushed", !opts?.auto)) return;
-    if (this.onComputer && opts?.auto && this.computerReadOnly) return;
+    if (this.onComputer && opts?.auto && this.computerReadOnlyNow()) return;
     if (!opts?.force && this.settings.bases[path] === void 0) {
       const state = await this.serverState(path);
       if (state === "server-changed") {
@@ -7506,9 +8013,10 @@ ${block.join("\n")}`, { line, ch: old.length });
         res = await send("merge");
         addOnly = res.status < 400;
       }
-      if (this.onComputer) this.computerReadOnly = res.status === 403;
+      if (this.onComputer) this.noteComputerAnswer(res.status);
       if (res.status >= 400) {
         new import_obsidian4.Notice(`Graphite: push refused (${res.status}) \u2014 ${res.json?.message ?? "see the app"}. Nothing was changed.`);
+        this.pushFailed(path, opts, res.status >= 500 ? "again" : "held", `push refused (${res.status})`);
         return;
       }
       const report = res.json;
@@ -7538,7 +8046,29 @@ ${bullets(said)}` : ""),
         new import_obsidian4.Notice(`Graphite: pushed, and the importer says:
 ${bullets(said)}`, 15e3);
       }
-      const fresh = await this.canonicalText(entry);
+      let fresh = null;
+      let readBack = false;
+      for (let i = 0; i < 3 && !readBack; i++) {
+        try {
+          fresh = await this.canonicalText(entry);
+          readBack = true;
+        } catch {
+          if (i < 2 && this.canonRetryMs > 0) {
+            await new Promise((r) => window.setTimeout(r, this.canonRetryMs * (i + 1)));
+          }
+        }
+      }
+      if (!readBack) {
+        entry.landedUnread = true;
+        await this.saveSettings();
+        this.refreshPanel();
+        new import_obsidian4.Notice(
+          "Graphite: pushed, but the note could not be read back. It will not be sent again until you Pull, so nothing is made twice.",
+          12e3
+        );
+        this.pushFailed(path, opts, "held", "pushed, not read back");
+        return;
+      }
       if (fresh === null) {
         new import_obsidian4.Notice("Graphite: pushed, but the server did not return this note \u2014 Pull to refresh.");
         return;
@@ -7560,6 +8090,7 @@ ${bullets(said)}`, 15e3);
       entry.lastHash = hash(text);
       putBase(this.settings.bases, path, text);
       await this.saveSettings();
+      this.pushWorked(path);
       this.refreshPanel();
       if (kept) {
         if (this.settings.autoPush) this.schedulePush(path);
@@ -7571,6 +8102,7 @@ ${bullets(said)}`, 15e3);
       }
     } catch (e) {
       new import_obsidian4.Notice(`Graphite: push failed \u2014 ${e}`);
+      this.pushFailed(path, opts, "again", "push failed");
     }
   }
   /** The server's current text FOR THIS FILE. Null when the file's module is
@@ -7631,6 +8163,14 @@ ${bullets(said)}`, 15e3);
     const localMoved = hash(old) !== entry.lastHash;
     const serverMoved = hash(keepFreeform(old, incoming)) !== entry.lastHash;
     return localMoved && serverMoved;
+  }
+  /** R-490: TRUE when only the vault moved - the note holds typing that has
+   *  not been pushed, and the server's text is the one last synced. A pull has
+   *  nothing to bring in for it, and writing the server's text would put the
+   *  old words over the new ones with no copy kept. */
+  vaultOnlyMoved(entry, old, incoming) {
+    if (!entry?.lastHash || old === null) return false;
+    return hash(old) !== entry.lastHash && hash(keepFreeform(old, incoming)) === entry.lastHash;
   }
   /** R-399: never destroy vault writing. Before the canonical text replaces
    *  a both-moved note, the user's version is copied BESIDE it — an ordinary
@@ -8191,6 +8731,13 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
     containerEl.empty();
     const onDevice = this.plugin.onDevice;
     const onComputer = this.plugin.onComputer;
+    new import_obsidian4.Setting(containerEl).setName("Set up").setHeading();
+    if (!onDevice && !onComputer) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: this.plugin.lastCheck?.ok ? "Linked. Switch on the spaces this vault should mirror below. Everything else is under More options." : "Two steps. 1. Link this vault: in the Graphite app open Preferences, Data and server, Obsidian mirror, make a key for the plugin, copy the plugin link and paste it here. 2. Press Test connection, then switch on the spaces to mirror."
+      });
+    }
     new import_obsidian4.Setting(containerEl).setName("Where Graphite is").setDesc('A server, or the Graphite app on this device or computer. "This computer" reads the spaces the app holds, with no server and no account: it needs Obsidian on a desktop and the Graphite app open on the same computer, with "Let the notes plugin read Graphite on this computer" turned on in its Settings, Data and server (a phone cannot; use Server). "This device" needs no server and no account: the Graphite app writes your spaces into this vault as notes whenever it is opened, and takes in what you changed here the next time it is opened. Nothing runs in the background, so a change you make here waits for that. In Graphite, choose this vault in Settings, Data and server, Data locations.').addDropdown((d) => d.addOption("server", "Server").addOption("device", "This device").addOption("computer", "This computer").setValue(this.plugin.settings.source).onChange(async (v) => {
       if (v === "computer" && !import_obsidian4.Platform.isDesktopApp) {
         new import_obsidian4.Notice(`Graphite: ${doorSentence("phone")}`, 1e4);
@@ -8210,11 +8757,42 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
       const look = this.plugin.doorLook(true);
       new import_obsidian4.Setting(containerEl).setName("This computer").setDesc(look.ok ? "Found the Graphite app on this computer. There is no address or token to enter: the app leaves them where this plugin reads them, and they change each time the app starts." : doorSentence(look.why));
     } else {
+      new import_obsidian4.Setting(containerEl).setName("Paste the link from Graphite").setDesc("The Graphite app copies one line that holds the server address and the key. Paste it here and the two fields below are filled and the connection is tested.").addText((t) => t.setPlaceholder("graphite-link:v1.\u2026").onChange(async (v) => {
+        const got = parseLink(v);
+        if (!got) {
+          if (v.trim().startsWith("graphite-link:") && v.trim().length > 40) {
+            new import_obsidian4.Notice("Graphite: that link is not complete or not valid. Copy it again from the app.");
+          }
+          return;
+        }
+        this.plugin.settings.serverUrl = got.serverUrl;
+        this.plugin.settings.token = got.token;
+        await this.plugin.saveSettings();
+        await this.plugin.checkConnection(true);
+        this.display();
+      }));
+      new import_obsidian4.Setting(containerEl).setName("Pairing code").setDesc("Or, with the server address below filled in: in the Graphite app, Preferences, Data and server, Obsidian mirror, press Show a pairing code, and type its six characters here. It works once, for ten minutes, and fills in the key.").addText((t) => t.setPlaceholder("ABC-234").onChange(async (v) => {
+        const code2 = parsePairingCode(v);
+        if (!code2) return;
+        if (!this.plugin.settings.serverUrl.trim()) {
+          new import_obsidian4.Notice("Graphite: fill in the server address below first, then type the code again.");
+          return;
+        }
+        const got = await this.plugin.redeemPairingCode(code2);
+        if (!got.token) {
+          new import_obsidian4.Notice(`Graphite: ${got.said}`, 1e4);
+          return;
+        }
+        this.plugin.settings.token = got.token;
+        await this.plugin.saveSettings();
+        await this.plugin.checkConnection(true);
+        this.display();
+      }));
       new import_obsidian4.Setting(containerEl).setName("Server URL").setDesc("The Graphite server your account is on, e.g. https://graphite.example.com. Only spaces kept on a server can be pulled from it. To read spaces kept on your devices, or shared between them through the relay, choose This device above.").addText((t) => t.setPlaceholder("https://graphite.example.com").setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
         this.plugin.settings.serverUrl = v.trim();
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("API token").setDesc("Generate one in the Graphite app, signed in to that server: Settings \u2192 Where am I signed in? \u2192 Generate API token.").addText((t) => t.setValue(this.plugin.settings.token).onChange(async (v) => {
+      new import_obsidian4.Setting(containerEl).setName("API token").setDesc("Filled in when you paste the link above. To type it instead, make a key for the plugin in the Graphite app: Preferences, Data and server, Obsidian mirror.").addText((t) => t.setValue(this.plugin.settings.token).onChange(async (v) => {
         this.plugin.settings.token = v.trim();
         await this.plugin.saveSettings();
       }));
@@ -8224,36 +8802,49 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
     }));
     if (!onDevice && !onComputer) {
       const mirrorList = containerEl.createDiv();
-      new import_obsidian4.Setting(containerEl).setName("Spaces to mirror").setDesc("This vault mirrors no space until you switch it on. A space you own is mirrored at once. A space shared with you waits until its owner approves it in Graphite, and the owner can stop it later. Edits go back to Graphite when you push them (or with Auto-push below), into the space this vault is bound to.").addButton((b) => b.setButtonText("Bring in now").onClick(async () => {
+      new import_obsidian4.Setting(containerEl).setName("Spaces to mirror").setDesc("This vault mirrors no space until you switch it on. A space you own is mirrored at once. A space shared with you waits until its owner approves it in Graphite, and the owner can stop it later. Edits go back to Graphite when you push them (or with Auto-push, under More options), into the space this vault is bound to.").addButton((b) => b.setButtonText("Bring in now").onClick(async () => {
         if (await this.plugin.checkConnection(true)) await this.plugin.mirrorChosenSpaces(true);
         await this.drawMirrorRows(mirrorList);
       }));
       containerEl.appendChild(mirrorList);
       this.mirrorRows = this.drawMirrorRows(mirrorList);
     }
+    const more = containerEl.createEl("details", { cls: "gr-more" });
+    more.createEl("summary", { text: "More options" });
+    more.createEl("p", {
+      cls: "setting-item-description",
+      text: "How spaces land in the vault, sending your edits back, capturing tasks, notes between devices, the Graphite bar and the connected devices. None of it is needed to mirror your spaces."
+    });
+    const adv = more.createDiv();
     if (!onDevice) {
-      new import_obsidian4.Setting(containerEl).setName("Vault layout").setDesc(`How a pulled space lands here. "Folder per space" writes an index note plus one note per module, linked to each other and carrying the module's own tags \u2014 so a module is a note you can open, link and embed on its own. Existing files keep the layout they were pulled with until you pull them again.`).addDropdown((d) => d.addOption("folder", "Folder per space (one note per module)").addOption("single", "One file per space").setValue(this.plugin.settings.layout).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Vault layout").setDesc(`How a pulled space lands here. "Folder per space" writes an index note plus one note per module, linked to each other and carrying the module's own tags \u2014 so a module is a note you can open, link and embed on its own. Existing files keep the layout they were pulled with until you pull them again.`).addDropdown((d) => d.addOption("folder", "Folder per space (one note per module)").addOption("single", "One file per space").setValue(this.plugin.settings.layout).onChange(async (v) => {
         this.plugin.settings.layout = v === "folder" ? "folder" : "single";
         await this.plugin.saveSettings();
         this.plugin.refreshPanel();
       }));
     }
-    new import_obsidian4.Setting(containerEl).setName("Hide sync ids").setDesc('Hide the "lp:" id markers the sync uses for matching records. They stay in the file (pushes need them) and reveal themselves on the line you are editing.').addToggle((t) => t.setValue(this.plugin.settings.hideIds).onChange(async (v) => {
+    new import_obsidian4.Setting(adv).setName("Hide sync ids").setDesc('Hide the "lp:" id markers the sync uses for matching records. They stay in the file (pushes need them) and reveal themselves on the line you are editing.').addToggle((t) => t.setValue(this.plugin.settings.hideIds).onChange(async (v) => {
       this.plugin.settings.hideIds = v;
       await this.plugin.saveSettings();
     }));
+    if (!onDevice && !onComputer) {
+      new import_obsidian4.Setting(adv).setName("Pull while Obsidian is open").setDesc("Every 5 minutes this vault looks at the spaces it mirrors and brings in what changed in Graphite. A note you have edited here is never overwritten: it is left alone and said.").addToggle((t) => t.setValue(this.plugin.settings.timedPull !== false).onChange(async (v) => {
+        this.plugin.settings.timedPull = v;
+        await this.plugin.saveSettings();
+      }));
+    }
     if (!onDevice) {
-      new import_obsidian4.Setting(containerEl).setName("Auto-push on save").setDesc("Push tracked files ~2.5s after you stop editing. Off = manual pushes only.").addToggle((t) => t.setValue(this.plugin.settings.autoPush).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Auto-push on save").setDesc("Push tracked files ~2.5s after you stop editing. Off = manual pushes only.").addToggle((t) => t.setValue(this.plugin.settings.autoPush).onChange(async (v) => {
         this.plugin.settings.autoPush = v;
         await this.plugin.saveSettings();
         this.plugin.refreshPanel();
       }));
     }
     if (onDevice || onComputer) {
-      new import_obsidian4.Setting(containerEl).setName("Capture, binding and census").setDesc("These need a Graphite server, so they are off while Graphite is read from this " + (onComputer ? "computer" : "device") + ". Choose Server above to use them.");
+      new import_obsidian4.Setting(adv).setName("Capture, binding and census").setDesc("These need a Graphite server, so they are off while Graphite is read from this " + (onComputer ? "computer" : "device") + ". Choose Server above to use them.");
     } else {
       const binding = this.plugin.fetchBinding().catch(() => null);
-      new import_obsidian4.Setting(containerEl).setName("This vault's space").setDesc("Everything this vault writes to Graphite lands in this space or a space nested inside it \u2014 or nowhere: a note that names a space outside it is refused, and the refusal says which (unless All my spaces, below, is on). Nothing is written until a space is chosen. New spaces and captured lines go here.").addDropdown((d) => {
+      new import_obsidian4.Setting(adv).setName("This vault's space").setDesc("Everything this vault writes to Graphite lands in this space or a space nested inside it \u2014 or nowhere: a note that names a space outside it is refused, and the refusal says which (unless All my spaces, below, is on). Nothing is written until a space is chosen. New spaces and captured lines go here.").addDropdown((d) => {
         d.addOption("", "Not bound \u2014 this vault writes nothing");
         d.setValue("");
         d.onChange(async (v) => {
@@ -8267,7 +8858,7 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         }).catch(() => {
         });
       });
-      new import_obsidian4.Setting(containerEl).setName("All my spaces").setDesc("Off: this vault writes only into its space and the spaces inside it. On: your edits go back to every other space this vault mirrors (see Spaces to mirror) that you are allowed to write in, and Graphite still checks each one. It never adds a space. Needs a space chosen above.").addToggle((t) => {
+      new import_obsidian4.Setting(adv).setName("All my spaces").setDesc("Off: this vault writes only into its space and the spaces inside it. On: your edits go back to every other space this vault mirrors (see Spaces to mirror) that you are allowed to write in, and Graphite still checks each one. It never adds a space. Needs a space chosen above.").addToggle((t) => {
         t.setValue(false);
         t.onChange(async (v) => {
           if (this.quiet || v === this.plugin.vaultAllSpaces) return;
@@ -8275,7 +8866,7 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         });
         void binding.then((b) => this.setQuietly(() => t.setValue(!!(b?.bound && b.allSpaces)))).catch(() => void 0);
       });
-      new import_obsidian4.Setting(containerEl).setName("Capture inbox").setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds in any note that is not a synced one. The line is marked afterwards, so capturing again never makes it twice. Choose the space this vault is bound to first.').addDropdown((d) => {
+      new import_obsidian4.Setting(adv).setName("Capture inbox").setDesc('Where "Capture tasks from this vault" files a `- [ ]` line it finds in any note that is not a synced one. The line is marked afterwards, so capturing again never makes it twice. Choose the space this vault is bound to first.').addDropdown((d) => {
         d.addOption("", "Off");
         d.setValue("");
         d.onChange(async (v) => {
@@ -8292,67 +8883,67 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
         }).catch(() => {
         });
       });
-      new import_obsidian4.Setting(containerEl).setName("Capture any tagged line as a note").setDesc("A line that is not a task but has a #tag becomes a note in the capture inbox's space (its first Notes module), marked so it is never captured twice. Headings and lines of only tags are left alone.").addToggle((t) => t.setValue(this.plugin.settings.captureAnyTagged).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Capture any tagged line as a note").setDesc("A line that is not a task but has a #tag becomes a note in the capture inbox's space (its first Notes module), marked so it is never captured twice. Headings and lines of only tags are left alone.").addToggle((t) => t.setValue(this.plugin.settings.captureAnyTagged).onChange(async (v) => {
         this.plugin.settings.captureAnyTagged = v;
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("Capture lines with these tags as notes").setDesc("Comma-separated, e.g. st, mtg. A tag takes everything beneath it: st takes #st/IS-07. Works whether or not the switch above is on.").addText((t) => t.setPlaceholder("st, mtg").setValue(this.plugin.settings.captureTags).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Capture lines with these tags as notes").setDesc("Comma-separated, e.g. st, mtg. A tag takes everything beneath it: st takes #st/IS-07. Works whether or not the switch above is on.").addText((t) => t.setPlaceholder("st, mtg").setValue(this.plugin.settings.captureTags).onChange(async (v) => {
         this.plugin.settings.captureTags = v;
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("Capture automatically").setDesc("Capture a note a minute after it stops changing, whether you wrote it here or it arrived from another device, so nothing waits for the command. A note open in the editor waits until you leave it. Needs the capture inbox above.").addToggle((t) => t.setValue(this.plugin.settings.autoCapture).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Capture automatically").setDesc("Capture a note a minute after it stops changing, whether you wrote it here or it arrived from another device, so nothing waits for the command. A note open in the editor waits until you leave it. Needs the capture inbox above.").addToggle((t) => t.setValue(this.plugin.settings.autoCapture).onChange(async (v) => {
         this.plugin.settings.autoCapture = v;
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("Send notes to Graphite as pages").setDesc("Off by default. When on, a note in one of the folders below, or one with a routing heading (## Weekly >> Space), is sent to Graphite whole a minute after it stops changing and shown there as a read-only page with the tasks captured from it. This vault must be bound to a space, above; no capture inbox is needed.").addToggle((t) => t.setValue(this.plugin.settings.pagesOn).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Send notes to Graphite as pages").setDesc("Off by default. When on, a note in one of the folders below, or one with a routing heading (## Weekly >> Space), is sent to Graphite whole a minute after it stops changing and shown there as a read-only page with the tasks captured from it. This vault must be bound to a space, above; no capture inbox is needed.").addToggle((t) => t.setValue(this.plugin.settings.pagesOn).onChange(async (v) => {
         this.plugin.settings.pagesOn = v;
         await this.plugin.saveSettings();
       }));
-      new import_obsidian4.Setting(containerEl).setName("Folders whose notes become pages").setDesc("Comma-separated, e.g. Meetings. Every note in these folders is a page, while the switch above is on. Empty by default. A note with a routing heading is a page whatever this says. Pick the Notes module for each folder below.").addText((t) => t.setPlaceholder("Meetings").setValue(this.plugin.settings.pageFolders).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Folders whose notes become pages").setDesc("Comma-separated, e.g. Meetings. Every note in these folders is a page, while the switch above is on. Empty by default. A note with a routing heading is a page whatever this says. Pick the Notes module for each folder below.").addText((t) => t.setPlaceholder("Meetings").setValue(this.plugin.settings.pageFolders).onChange(async (v) => {
         this.plugin.settings.pageFolders = v;
         await this.plugin.saveSettings();
         this.drawPageModules();
       }));
-      this.pageRows = containerEl.createDiv();
+      this.pageRows = adv.createDiv();
       this.pageModuleList = this.plugin.fetchPageModuleChoices();
       this.drawPageModules();
       const sent = this.plugin.censusState;
-      new import_obsidian4.Setting(containerEl).setName("Send a vault census to the morning sweep").setDesc("Off by default. When on, Graphite is sent \u2014 for each note with an unticked to-do nobody filed, or dated in the last week \u2014 its path, its date, how many task lines it holds in each state, its tags and its links. Never a word of the note. The sweep uses it to find to-dos nobody filed and meetings with no note; without it, the sweep says it could not look at the vault." + (sent === "failed" ? " The last census could not be sent." : sent === "too-big" ? " The last census was too large to send." : sent ? ` Last sent with ${sent.notes} note${sent.notes === 1 ? "" : "s"}.` : "")).addToggle((t) => t.setValue(this.plugin.settings.censusOn).onChange(async (v) => {
+      new import_obsidian4.Setting(adv).setName("Send a vault census to the morning sweep").setDesc("Off by default. When on, Graphite is sent \u2014 for each note with an unticked to-do nobody filed, or dated in the last week \u2014 its path, its date, how many task lines it holds in each state, its tags and its links. Never a word of the note. The sweep uses it to find to-dos nobody filed and meetings with no note; without it, the sweep says it could not look at the vault." + (sent === "failed" ? " The last census could not be sent." : sent === "too-big" ? " The last census was too large to send." : sent ? ` Last sent with ${sent.notes} note${sent.notes === 1 ? "" : "s"}.` : "")).addToggle((t) => t.setValue(this.plugin.settings.censusOn).onChange(async (v) => {
         this.plugin.settings.censusOn = v;
         await this.plugin.saveSettings();
         if (v) await this.plugin.reportCensus({ loud: true });
       }));
     }
     const agent = this.plugin.agentState;
-    new import_obsidian4.Setting(containerEl).setName("Publish the agent contract").setDesc("Off by default. When on, two notes are written into Graphite/ in this vault: the routing list \u2014 the spaces, modules and tags your own agent may choose from, and nothing else \u2014 and the agent brief, which tells it how to write proposals. Your agent reads them and the folders below; the text of those notes goes to your agent's own model provider, never to Graphite. Graphite receives only what you approve. The brief's rules are instructions to your agent, not code \u2014 except the closed list, which approval checks." + (agent === "stale" ? " The last refresh could not reach Graphite." : "")).addToggle((t) => t.setValue(this.plugin.settings.agentOn).onChange(async (v) => {
+    new import_obsidian4.Setting(adv).setName("Publish the agent contract").setDesc("Off by default. When on, two notes are written into Graphite/ in this vault: the routing list \u2014 the spaces, modules and tags your own agent may choose from, and nothing else \u2014 and the agent brief, which tells it how to write proposals. Your agent reads them and the folders below; the text of those notes goes to your agent's own model provider, never to Graphite. Graphite receives only what you approve. The brief's rules are instructions to your agent, not code \u2014 except the closed list, which approval checks." + (agent === "stale" ? " The last refresh could not reach Graphite." : "")).addToggle((t) => t.setValue(this.plugin.settings.agentOn).onChange(async (v) => {
       this.plugin.settings.agentOn = v;
       await this.plugin.saveSettings();
       if (v) await this.plugin.publishAgentContract({ loud: true });
     }));
-    new import_obsidian4.Setting(containerEl).setName("Show the Graphite bar").setDesc("A row of buttons above a note (below it on a phone or tablet): start a list, task, due, assign, priority, tag, send to, capture now. It is not shown in a note Graphite syncs. Every button is also a command, so you can put them on a phone toolbar and hide the row.").addToggle((t) => t.setValue(this.plugin.settings.barOn).onChange(async (v) => {
+    new import_obsidian4.Setting(adv).setName("Show the Graphite bar").setDesc("A row of buttons above a note (below it on a phone or tablet): start a list, task, due, assign, priority, tag, send to, capture now. It is not shown in a note Graphite syncs. Every button is also a command, so you can put them on a phone toolbar and hide the row.").addToggle((t) => t.setValue(this.plugin.settings.barOn).onChange(async (v) => {
       this.plugin.settings.barOn = v;
       await this.plugin.saveSettings();
       this.plugin.syncBars();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Share the picker lists with other devices").setDesc("On by default. While connected, the spaces, their Tasks and Notes modules, the people of each space and the tags in use are written to Graphite/Toolbar lists.json in this vault, so a tablet that has the plugin but no sign-in can still offer them in the bar pickers. Names only, never a token, an address or a password.").addToggle((t) => t.setValue(this.plugin.settings.barShare).onChange(async (v) => {
+    new import_obsidian4.Setting(adv).setName("Share the picker lists with other devices").setDesc("On by default. While connected, the spaces, their Tasks and Notes modules, the people of each space and the tags in use are written to Graphite/Toolbar lists.json in this vault, so a tablet that has the plugin but no sign-in can still offer them in the bar pickers. Names only, never a token, an address or a password.").addToggle((t) => t.setValue(this.plugin.settings.barShare).onChange(async (v) => {
       this.plugin.settings.barShare = v;
       await this.plugin.saveSettings();
       if (v) await this.plugin.publishToolbarLists();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Folders your agent may read").setDesc("Comma-separated, e.g. Daily, Meetings. Empty means none: the brief then tells your agent to read nothing. A note tagged #private is never read, whatever folder it is in.").addText((t) => t.setPlaceholder("Daily, Meetings").setValue(this.plugin.settings.agentFolders).onChange(async (v) => {
+    new import_obsidian4.Setting(adv).setName("Folders your agent may read").setDesc("Comma-separated, e.g. Daily, Meetings. Empty means none: the brief then tells your agent to read nothing. A note tagged #private is never read, whatever folder it is in.").addText((t) => t.setPlaceholder("Daily, Meetings").setValue(this.plugin.settings.agentFolders).onChange(async (v) => {
       this.plugin.settings.agentFolders = v;
       await this.plugin.saveSettings();
       if (this.plugin.settings.agentOn) await this.plugin.publishAgentContract();
     }));
-    this.drawNoteSync(containerEl);
-    new import_obsidian4.Setting(containerEl).setName("Connected devices and servers").setHeading();
-    containerEl.createEl("p", {
+    this.drawNoteSync(adv);
+    new import_obsidian4.Setting(adv).setName("Connected devices and servers").setHeading();
+    adv.createEl("p", {
       cls: "setting-item-description",
       text: "What the servers last recorded \u2014 not a live view. Graphite Sync asks a server only when you open this tab or press something, so it never shows a device as online or as typing."
     });
-    const servers = containerEl.createDiv();
+    const servers = adv.createDiv();
     this.drawServers(servers);
-    const devices = containerEl.createDiv();
+    const devices = adv.createDiv();
     this.drawDevices(devices, "asking");
     this.deviceList = this.plugin.fetchDevices().then(() => this.drawDevices(devices, "answered"));
   }
@@ -8364,8 +8955,13 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
     const s = this.plugin.settings;
     const save = async () => {
       await this.plugin.saveSettings();
-      this.plugin.restartNoteSync();
+      this.plugin.restartNoteSyncSoon({ now: true });
     };
+    const saveTyped = async () => {
+      await this.plugin.saveSettings();
+      this.plugin.restartNoteSyncSoon();
+    };
+    const leave = (t) => t.inputEl.addEventListener?.("blur", () => this.plugin.flushNoteSyncRestart());
     new import_obsidian4.Setting(containerEl).setName("Note sync").setHeading();
     new import_obsidian4.Setting(containerEl).setName("Carry this vault between devices").setDesc("Every ordinary file in this vault travels, sealed on this device first, so the server holds neither the notes nor their names. Use a new database, not the LiveSync one: it stays as it is. Hidden files, plugin settings and files over 50 MB never travel.").addDropdown((d) => {
       for (const k of NOTE_SYNC_KINDS) d.addOption(k, NOTE_SYNC_LABELS[k]);
@@ -8376,30 +8972,41 @@ var LpSettingTab = class extends import_obsidian4.PluginSettingTab {
       });
     });
     if (s.noteSync === "couchdb") {
-      new import_obsidian4.Setting(containerEl).setName("CouchDB server").setDesc("The address of the server, with no database on the end.").addText((t) => t.setPlaceholder("https://couch.example.com").setValue(s.couchUrl).onChange(async (v) => {
-        s.couchUrl = v.trim();
-        await save();
-      }));
-      new import_obsidian4.Setting(containerEl).setName("Database").setDesc("Lowercase letters, digits and _ $ ( ) + - /, starting with a letter.").addText((t) => t.setValue(s.couchDb).onChange(async (v) => {
-        s.couchDb = v.trim();
-        await save();
-      }));
-      new import_obsidian4.Setting(containerEl).setName("CouchDB user").addText((t) => t.setValue(s.couchUser).onChange(async (v) => {
-        s.couchUser = v.trim();
-        await save();
-      }));
+      new import_obsidian4.Setting(containerEl).setName("CouchDB server").setDesc("The address of the server, with no database on the end.").addText((t) => {
+        leave(t);
+        t.setPlaceholder("https://couch.example.com").setValue(s.couchUrl).onChange(async (v) => {
+          s.couchUrl = v.trim();
+          await saveTyped();
+        });
+      });
+      new import_obsidian4.Setting(containerEl).setName("Database").setDesc("Lowercase letters, digits and _ $ ( ) + - /, starting with a letter.").addText((t) => {
+        leave(t);
+        t.setValue(s.couchDb).onChange(async (v) => {
+          s.couchDb = v.trim();
+          await saveTyped();
+        });
+      });
+      new import_obsidian4.Setting(containerEl).setName("CouchDB user").addText((t) => {
+        leave(t);
+        t.setValue(s.couchUser).onChange(async (v) => {
+          s.couchUser = v.trim();
+          await saveTyped();
+        });
+      });
       new import_obsidian4.Setting(containerEl).setName("CouchDB password").setDesc("Kept on this device only. It is never written to the settings note.").addText((t) => {
         t.inputEl.type = "password";
+        leave(t);
         t.setValue(s.couchPassword).onChange(async (v) => {
           s.couchPassword = v;
-          await save();
+          await saveTyped();
         });
       });
       new import_obsidian4.Setting(containerEl).setName("Encryption passphrase").setDesc("Every note is sealed under this before it leaves this device. Type the same passphrase on each device; it is kept on this device only and never written to the settings note. Lose it and the notes in the database cannot be read.").addText((t) => {
         t.inputEl.type = "password";
+        leave(t);
         t.setValue(s.couchPassphrase).onChange(async (v) => {
           s.couchPassphrase = v;
-          await save();
+          await saveTyped();
         });
       });
       new import_obsidian4.Setting(containerEl).setName("Live sync").setDesc("Changes travel as they happen, rather than when you ask.").addToggle((t) => t.setValue(s.liveSync).onChange(async (v) => {

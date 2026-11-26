@@ -30,6 +30,7 @@
 
 import { sha256Hex } from './note-crypto';
 import { mergeLines } from './note-merge';
+import { Pacer } from './pacer';
 import {
   NOTE_SYNC_MAX_BYTES, inNoteSyncScope, type NoteTransport, type OutgoingFile, type RemoteFile,
 } from './note-sync';
@@ -68,6 +69,12 @@ export interface SyncedRecord {
   version: string;
   /** SHA-256 of the bytes last agreed; empty for a file agreed deleted. */
   hash: string;
+  /** The modified time and size the file had when it was last seen to hash
+   *  to `hash`: a file still showing both is not read again. Absent after a
+   *  write from the far side (the vault stamps it), so the next run reads
+   *  the file once and records them. */
+  mtime?: number;
+  size?: number;
 }
 
 export interface NoteSyncState {
@@ -95,6 +102,12 @@ export interface NoteSyncReport {
   unreadable: number;
 }
 
+/** One send goes up in slices of at most this many files and bytes, so a
+ *  first upload holds one slice in memory, not the vault, and what has gone
+ *  up is remembered if a later slice fails. */
+export const SEND_SLICE_DOCS = 100;
+export const SEND_SLICE_BYTES = 8 * 1024 * 1024;
+
 const ZERO = (): NoteSyncReport => ({ received: [], sent: [], trashed: [], conflicts: [], moved: [], merged: [], kept: [], refused: [], unreadable: 0 });
 
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -117,6 +130,9 @@ export function conflictCopyPath(path: string, at: Date, taken: (p: string) => b
 
 export class NoteSyncEngine {
   private report = ZERO();
+  /** The versions this run wrote on the far side, so the cursor can step
+   *  over them rather than wake the live loop for its own push. */
+  private wrote = new Set<string>();
 
   constructor(
     private transport: NoteTransport,
@@ -136,25 +152,57 @@ export class NoteSyncEngine {
 
   async run(): Promise<NoteSyncReport> {
     this.report = ZERO();
+    this.wrote = new Set();
     await this.receiveAll();
-    const moved = await this.sendChanged();
+    const moved = await this.sendChanged(false);
     if (moved) {
       await this.receiveAll();
-      await this.sendChanged();
+      await this.sendChanged(true);
     }
+    await this.stepOverOwn();
     return this.report;
   }
 
+  /** Our own pushes are in the changes feed after the cursor; unless the
+   *  cursor steps over them, the live loop wakes for them and runs the whole
+   *  vault again. Only when every change since is one we wrote. */
+  private async stepOverOwn() {
+    if (!this.wrote.size || !this.transport.skipOwn) return;
+    try {
+      const at = await this.transport.skipOwn(this.state.cursor, this.wrote);
+      if (at) this.state.cursor = at;
+    } catch { /* the next run pulls them, as it always did */ }
+  }
+
   private async receiveAll() {
+    // One note this vault cannot write (a name its filesystem refuses, a
+    // folder where a file should be) is said and left; it must not stop the
+    // others, nor the sending of what changed here. The cursor is held at
+    // the first page that had one, so the next run tries it again.
+    let held = false;
+    let at = this.state.cursor;
     for (;;) {
-      const page = await this.transport.pull(this.state.cursor);
+      const page = await this.transport.pull(at);
       this.report.unreadable += page.unreadable ?? 0;
-      const taken = await this.receiveMoves(page.files);
-      for (const f of page.files) {
-        if (!taken.has(f)) await this.receive(f);
-        if (f.others?.length) await this.keepOthers(f);
+      let failed = false;
+      try {
+        const taken = await this.receiveMoves(page.files);
+        for (const f of page.files) {
+          try {
+            if (!taken.has(f)) await this.receive(f);
+            if (f.others?.length) await this.keepOthers(f);
+          } catch (e) {
+            failed = true;
+            this.report.refused.push({ path: f.path, reason: `it could not be written in this vault (${(e as Error).message})` });
+          }
+        }
+      } catch (e) {
+        failed = true;
+        this.report.refused.push({ path: '', reason: `a batch of notes could not be taken in (${(e as Error).message})` });
       }
-      this.state.cursor = page.cursor;
+      if (failed) held = true;
+      at = page.cursor;
+      if (!held) this.state.cursor = page.cursor;
       if (!page.more) break;
     }
   }
@@ -206,7 +254,14 @@ export class NoteSyncEngine {
     return taken;
   }
 
-  private async receive(remote: RemoteFile) {
+  /** True when [path] is no longer what [hash] says it was: he typed (or
+   *  deleted it) between our reading it and our about to write over it. */
+  private async drifted(path: string, hash: string): Promise<boolean> {
+    const now = await this.vault.read(path);
+    return (now ? await sha256Hex(now) : '') !== hash;
+  }
+
+  private async receive(remote: RemoteFile, tries = 0): Promise<void> {
     const path = remote.path;
     // A path the scope rule keeps out is never written, whatever arrives.
     if (!inNoteSyncScope(path)) return;
@@ -223,7 +278,16 @@ export class NoteSyncEngine {
       return;
     }
     const changedHere = rec ? localHash !== rec.hash : local !== null;
+    // Nothing is written over a note that moved since it was read above: it
+    // is taken again, and then both sides have changed, and both are kept.
+    const again = async () => {
+      if (!(await this.drifted(path, localHash))) return false;
+      if (tries >= 3) throw new Error('it kept changing while it was being written');
+      await this.receive(remote, tries + 1);
+      return true;
+    };
     if (!changedHere) {
+      if (await again()) return;
       if (remote.deleted) {
         if (local) { await this.vault.trash(path); this.report.trashed.push(path); }
       } else {
@@ -244,6 +308,7 @@ export class NoteSyncEngine {
     }
     if (!local) {
       // Deleted here, edited there: the edit comes back.
+      if (await again()) return;
       await this.vault.write(path, remote.content!, remote.mtime);
       agree(remoteHash);
       this.report.kept.push(path);
@@ -255,6 +320,7 @@ export class NoteSyncEngine {
     // send). Only a note with the version both last agreed can be merged.
     const merged = await this.mergeBoth(path, local, remote.content!);
     if (merged) {
+      if (await again()) return;
       await this.vault.write(path, merged, this.now().getTime());
       agree(remoteHash);
       this.report.merged.push(path);
@@ -283,6 +349,19 @@ export class NoteSyncEngine {
     if (!inNoteSyncScope(path)) return;
     const here = await this.vault.read(path);
     const kept = new Set<string>([here ? await sha256Hex(here) : '']);
+    // A copy written by an earlier try (the far side was not told, the page
+    // came round again) is the same version already kept: not kept twice.
+    const dir = path.slice(0, path.lastIndexOf('/') + 1);
+    const name = path.slice(dir.length);
+    const dot = name.lastIndexOf('.');
+    const head = `${dir}${dot > 0 ? name.slice(0, dot) : name} (conflict `;
+    const tail = `)${dot > 0 ? name.slice(dot) : ''}`;
+    for (const f of await this.vault.list()) {
+      if (f.path.startsWith(head) && f.path.endsWith(tail)) {
+        const c = await this.vault.read(f.path);
+        if (c) kept.add(await sha256Hex(c));
+      }
+    }
     for (const o of remote.others ?? []) {
       if (o.deleted || !o.content) continue;
       const h = await sha256Hex(o.content);
@@ -307,11 +386,42 @@ export class NoteSyncEngine {
     return r.clean ? new TextEncoder().encode(r.text) : null;
   }
 
-  /** Send what changed here. True when the far side had moved under a
-   *  send, so the caller takes again before sending again. */
-  private async sendChanged(): Promise<boolean> {
-    const out: Array<OutgoingFile & { hash: string }> = [];
+  /** Send what changed here, a slice at a time. True when the far side had
+   *  moved under a send, so the caller takes again before sending again;
+   *  `last` is that second try, where a note that still conflicts is said
+   *  (it would otherwise sit unsent with nothing on screen). */
+  private async sendChanged(last: boolean): Promise<boolean> {
+    let out: Array<OutgoingFile & { hash: string }> = [];
+    let bytes = 0;
+    let moved = false;
     const present = new Set<string>();
+    const pace = new Pacer();
+    const flush = async () => {
+      if (!out.length) return;
+      const slice = out;
+      out = [];
+      bytes = 0;
+      const byPath = new Map(slice.map((f) => [f.path, f]));
+      for (const r of await this.transport.push(slice)) {
+        const f = byPath.get(r.path)!;
+        if (r.ok) {
+          this.state.files[r.path] = { version: r.version, hash: f.hash, ...(f.deleted ? {} : { mtime: f.mtime, size: f.content?.length ?? 0 }) };
+          this.wrote.add(r.version);
+          await this.keepBase(r.path, f.deleted ? null : f.content);
+          this.report.sent.push(r.path);
+        } else if (r.conflict) {
+          moved = true;
+          if (last) this.report.refused.push({ path: r.path, reason: 'the far side holds a version of it that this device cannot take in, so this one could not be sent' });
+        } else {
+          this.report.refused.push({ path: r.path, reason: r.reason });
+        }
+      }
+    };
+    const add = async (f: OutgoingFile & { hash: string }) => {
+      out.push(f);
+      bytes += f.content?.length ?? 0;
+      if (out.length >= SEND_SLICE_DOCS || bytes >= SEND_SLICE_BYTES) await flush();
+    };
     for (const f of await this.vault.list()) {
       if (!inNoteSyncScope(f.path)) continue;
       present.add(f.path);
@@ -319,32 +429,25 @@ export class NoteSyncEngine {
         this.report.refused.push({ path: f.path, reason: `it is ${(f.size / 1048576).toFixed(1)} MB, over the 50 MB that note sync carries` });
         continue;
       }
+      const rec = this.state.files[f.path];
+      // Seen unchanged by its modified time and size: not read again. A
+      // time of 0 is a vault that does not know it, and is always read.
+      if (rec && rec.hash !== '' && f.mtime > 0 && rec.mtime === f.mtime && rec.size === f.size) continue;
+      await pace.tick();
       const content = await this.vault.read(f.path);
       if (!content) continue;
       const hash = await sha256Hex(content);
-      const rec = this.state.files[f.path];
-      if (rec && rec.hash === hash) continue;
-      out.push({ path: f.path, content, mtime: f.mtime, deleted: false, base: rec?.version ?? null, hash });
+      if (rec && rec.hash === hash) {
+        if (f.mtime > 0) { rec.mtime = f.mtime; rec.size = content.length; }
+        continue;
+      }
+      await add({ path: f.path, content, mtime: f.mtime, deleted: false, base: rec?.version ?? null, hash });
     }
     for (const [path, rec] of Object.entries(this.state.files)) {
       if (present.has(path) || rec.hash === '' || !inNoteSyncScope(path)) continue;
-      out.push({ path, content: null, mtime: this.now().getTime(), deleted: true, base: rec.version, hash: '' });
+      await add({ path, content: null, mtime: this.now().getTime(), deleted: true, base: rec.version, hash: '' });
     }
-    if (!out.length) return false;
-    const byPath = new Map(out.map((f) => [f.path, f]));
-    let moved = false;
-    for (const r of await this.transport.push(out)) {
-      const f = byPath.get(r.path)!;
-      if (r.ok) {
-        this.state.files[r.path] = { version: r.version, hash: f.hash };
-        await this.keepBase(r.path, f.deleted ? null : f.content);
-        this.report.sent.push(r.path);
-      } else if (r.conflict) {
-        moved = true;
-      } else {
-        this.report.refused.push({ path: r.path, reason: r.reason });
-      }
-    }
+    await flush();
     return moved;
   }
 }
